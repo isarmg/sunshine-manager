@@ -9,7 +9,7 @@ use axum::{
     routing::{delete, get, patch, post},
 };
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
 
@@ -27,7 +27,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct WorkerState {
-    pub pool: PgPool,
+    pub pool: SqlitePool,
     pub secrets: SecretBox,
     pub auth: InternalAuth,
     pub production: bool,
@@ -37,7 +37,7 @@ pub struct WorkerState {
 
 impl WorkerState {
     pub fn new(
-        pool: PgPool,
+        pool: SqlitePool,
         secrets: SecretBox,
         auth: InternalAuth,
         production: bool,
@@ -211,12 +211,9 @@ async fn session(
     Extension(identity): Extension<InternalIdentity>,
 ) -> AppResult<Json<serde_json::Value>> {
     let user = sqlx::query_scalar::<_, String>(
-        "SELECT email FROM sunshine.auth_users WHERE user_id=$1 AND active=true",
+        "SELECT email FROM auth_users WHERE user_id=? AND active=true",
     )
-    .bind(
-        uuid::Uuid::parse_str(&identity.subject)
-            .map_err(|_| AppError::Unauthorized)?,
-    )
+    .bind(&identity.subject)
     .fetch_one(&state.pool)
     .await
     .map_err(|_| AppError::Unauthorized)?;
@@ -768,12 +765,12 @@ pub async fn probe_loop(state: WorkerState) {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use sqlx::postgres::PgPoolOptions;
+    use sqlx::sqlite::SqlitePoolOptions;
     use tower::ServiceExt;
 
     fn test_router() -> Router {
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgresql://localhost/unused")
+        let pool = SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
             .unwrap();
         let state = WorkerState::new(
             pool,

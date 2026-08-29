@@ -23,10 +23,8 @@ pub struct ServeConfig {
 impl ServeConfig {
     pub fn from_runtime() -> anyhow::Result<Self> {
         let database_url = required("SUNSHINE_MANAGER_DATABASE_URL")?;
-        if !database_url.starts_with("postgresql://")
-            && !database_url.starts_with("postgres://")
-        {
-            anyhow::bail!("SUNSHINE_MANAGER_DATABASE_URL must be a PostgreSQL URL");
+        if !database_url.starts_with("sqlite:") && !database_url.starts_with("sqlite://") {
+            anyhow::bail!("SUNSHINE_MANAGER_DATABASE_URL must be a SQLite URL");
         }
 
         let credential_key = decode_key(&required("SUNSHINE_MANAGER_CREDENTIAL_KEY")?)?;

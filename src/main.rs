@@ -136,27 +136,25 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn create_pg_dump(database_url: &str, output: &std::path::Path) -> anyhow::Result<()> {
-    let status = std::process::Command::new("pg_dump")
-        .arg("--format=custom")
-        .arg("--file")
+    let database = database_url.strip_prefix("sqlite://").unwrap_or(database_url);
+    let status = std::process::Command::new("sqlite3")
+        .arg(database)
+        .arg(".backup")
         .arg(output)
-        .arg(database_url)
         .status()?;
-    anyhow::ensure!(status.success(), "pg_dump failed");
+    anyhow::ensure!(status.success(), "sqlite3 backup failed");
     Ok(())
 }
 
 fn restore_pg_dump(database_url: &str, input: &std::path::Path) -> anyhow::Result<()> {
     anyhow::ensure!(input.is_file(), "restore file does not exist");
-    let status = std::process::Command::new("pg_restore")
-        .arg("--clean")
-        .arg("--if-exists")
-        .arg("--no-owner")
-        .arg("--dbname")
-        .arg(database_url)
+    let database = database_url.strip_prefix("sqlite://").unwrap_or(database_url);
+    let status = std::process::Command::new("sqlite3")
+        .arg(database)
+        .arg(".restore")
         .arg(input)
         .status()?;
-    anyhow::ensure!(status.success(), "pg_restore failed");
+    anyhow::ensure!(status.success(), "sqlite3 restore failed");
     Ok(())
 }
 

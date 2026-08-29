@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sqlx::{PgPool, Postgres, Transaction, migrate::Migrator, postgres::PgPoolOptions};
+use sqlx::{SqlitePool, Sqlite, Transaction, migrate::Migrator, sqlite::SqlitePoolOptions};
 
 use crate::{
     crypto::SecretBox,
@@ -10,7 +10,6 @@ use crate::{
 
 pub const SCHEMA: &str = "sunshine";
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
-const WRITE_LOCK: i64 = 0x5355_4e53_4849_4e45;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub(crate) struct StoredHost {
@@ -26,8 +25,8 @@ pub(crate) struct StoredHost {
     pub updated_at_micros: i64,
 }
 
-pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
-    Ok(PgPoolOptions::new()
+pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
+    Ok(SqlitePoolOptions::new()
         .max_connections(12)
         .acquire_timeout(Duration::from_secs(10))
         .connect(database_url)
@@ -36,50 +35,37 @@ pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
 
 /// Run only module-owned migrations. The deployment must provision the
 /// `sunshine` schema and make the worker role its owner before startup.
-pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
-    )
-    .bind(SCHEMA)
-    .fetch_one(pool)
-    .await?;
-    anyhow::ensure!(
-        exists,
-        "PostgreSQL schema 'sunshine' is not provisioned; the runtime role never creates schemas"
-    );
-    let mut connection = pool.acquire().await?;
-    sqlx::query("SET search_path TO sunshine, pg_catalog")
-        .execute(&mut *connection)
-        .await?;
-    MIGRATOR.run(&mut *connection).await?;
+pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
+    MIGRATOR.run(pool).await?;
     Ok(())
 }
 
-pub async fn ready(pool: &PgPool) -> bool {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('sunshine.hosts') IS NOT NULL AND to_regclass('sunshine.audit_logs') IS NOT NULL",
+pub async fn ready(pool: &SqlitePool) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('hosts','audit_logs','auth_users')",
     )
     .fetch_one(pool)
     .await
+    .map(|count| count == 3)
     .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct StoredUser {
-    pub user_id: uuid::Uuid,
+    pub user_id: String,
     pub email: String,
     pub password_hash: String,
     pub active: bool,
 }
 
 pub async fn find_active_user_by_email(
-    pool: &PgPool,
+    pool: &SqlitePool,
     email: &str,
 ) -> AppResult<Option<StoredUser>> {
     let normalized = email.trim().to_lowercase();
     let row = sqlx::query_as::<_, StoredUser>(
-        "SELECT user_id,email,password_hash,active FROM sunshine.auth_users \
-         WHERE email=$1 AND active=true",
+        "SELECT user_id,email,password_hash,active FROM auth_users \
+         WHERE email=? AND active=true",
     )
     .bind(normalized)
     .fetch_optional(pool)
@@ -88,11 +74,11 @@ pub async fn find_active_user_by_email(
 }
 
 pub async fn ensure_admin_user(
-    pool: &PgPool,
+    pool: &SqlitePool,
     email: &str,
     password: Option<&str>,
 ) -> AppResult<()> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sunshine.auth_users")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_users")
         .fetch_one(pool)
         .await?;
     if count > 0 {
@@ -107,10 +93,10 @@ pub async fn ensure_admin_user(
     let password_hash = crate::auth::hash_password(password)
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
     sqlx::query(
-        "INSERT INTO sunshine.auth_users(user_id,email,password_hash,active,created_at_micros) \
-         VALUES($1,$2,$3,true,$4)",
+        "INSERT INTO auth_users(user_id,email,password_hash,active,created_at_micros) \
+         VALUES(?,?,?,true,?)",
     )
-    .bind(uuid::Uuid::new_v4())
+    .bind(uuid::Uuid::new_v4().to_string())
     .bind(normalized)
     .bind(password_hash)
     .bind(now_micros()?)
@@ -120,7 +106,7 @@ pub async fn ensure_admin_user(
 }
 
 pub async fn reset_admin_password(
-    pool: &PgPool,
+    pool: &SqlitePool,
     email: &str,
     password: &str,
 ) -> AppResult<()> {
@@ -128,7 +114,7 @@ pub async fn reset_admin_password(
     let password_hash = crate::auth::hash_password(password)
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
     let result = sqlx::query(
-        "UPDATE sunshine.auth_users SET password_hash=$1 WHERE email=$2",
+        "UPDATE auth_users SET password_hash=? WHERE email=?",
     )
     .bind(password_hash)
     .bind(normalized)
@@ -142,11 +128,11 @@ pub async fn reset_admin_password(
     Ok(())
 }
 
-pub async fn list_hosts(pool: &PgPool, secrets: &SecretBox) -> AppResult<Vec<Host>> {
+pub async fn list_hosts(pool: &SqlitePool, secrets: &SecretBox) -> AppResult<Vec<Host>> {
     let rows = sqlx::query_as::<_, StoredHost>(
         r#"SELECT host_id,name,address,web_port,username,secret,verify_tls,position,
                   created_at_micros,updated_at_micros
-           FROM sunshine.hosts
+           FROM hosts
            ORDER BY position,created_at_micros,host_id"#,
     )
     .fetch_all(pool)
@@ -156,7 +142,7 @@ pub async fn list_hosts(pool: &PgPool, secrets: &SecretBox) -> AppResult<Vec<Hos
         .collect()
 }
 
-pub async fn get_host(pool: &PgPool, secrets: &SecretBox, id: &str) -> AppResult<Host> {
+pub async fn get_host(pool: &SqlitePool, secrets: &SecretBox, id: &str) -> AppResult<Host> {
     let row = get_stored_host(pool, id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Sunshine host '{id}' does not exist")))?;
@@ -164,7 +150,7 @@ pub async fn get_host(pool: &PgPool, secrets: &SecretBox, id: &str) -> AppResult
 }
 
 pub async fn insert_host(
-    pool: &PgPool,
+    pool: &SqlitePool,
     secrets: &SecretBox,
     request: HostSaveRequest,
     production: bool,
@@ -175,7 +161,7 @@ pub async fn insert_host(
     let mut transaction = pool.begin().await?;
     lock_writes(&mut transaction).await?;
     let position: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM sunshine.hosts")
+        sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM hosts")
             .fetch_one(&mut *transaction)
             .await?;
     let host = Host {
@@ -194,7 +180,7 @@ pub async fn insert_host(
     insert_stored(&mut transaction, &stored).await?;
     insert_audit(
         &mut transaction,
-        "sunshine.host.create",
+        "host.create",
         &host.id,
         actor,
         Some(&format!(
@@ -208,7 +194,7 @@ pub async fn insert_host(
 }
 
 pub async fn update_host(
-    pool: &PgPool,
+    pool: &SqlitePool,
     secrets: &SecretBox,
     id: &str,
     patch: HostPatchRequest,
@@ -264,7 +250,7 @@ pub async fn update_host(
     update_stored(&mut transaction, &stored).await?;
     insert_audit(
         &mut transaction,
-        "sunshine.host.update",
+        "host.update",
         &host.id,
         actor,
         Some(&format!(
@@ -277,10 +263,10 @@ pub async fn update_host(
     Ok(host)
 }
 
-pub async fn delete_host(pool: &PgPool, id: &str, actor: &str) -> AppResult<()> {
+pub async fn delete_host(pool: &SqlitePool, id: &str, actor: &str) -> AppResult<()> {
     let mut transaction = pool.begin().await?;
     lock_writes(&mut transaction).await?;
-    let result = sqlx::query("DELETE FROM sunshine.hosts WHERE host_id=$1")
+    let result = sqlx::query("DELETE FROM hosts WHERE host_id=?")
         .bind(id)
         .execute(&mut *transaction)
         .await?;
@@ -291,7 +277,7 @@ pub async fn delete_host(pool: &PgPool, id: &str, actor: &str) -> AppResult<()> 
     }
     insert_audit(
         &mut transaction,
-        "sunshine.host.delete",
+        "host.delete",
         id,
         actor,
         Some("host removed"),
@@ -302,7 +288,7 @@ pub async fn delete_host(pool: &PgPool, id: &str, actor: &str) -> AppResult<()> 
 }
 
 pub async fn audit_best_effort(
-    pool: &PgPool,
+    pool: &SqlitePool,
     action: &str,
     target: &str,
     actor: &str,
@@ -320,23 +306,19 @@ pub async fn audit_best_effort(
 }
 
 pub(crate) async fn lock_writes(
-    transaction: &mut Transaction<'_, Postgres>,
+    _transaction: &mut Transaction<'_, Sqlite>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(WRITE_LOCK)
-        .execute(&mut **transaction)
-        .await?;
     Ok(())
 }
 
 pub(crate) async fn get_stored_host(
-    pool: &PgPool,
+    pool: &SqlitePool,
     id: &str,
 ) -> Result<Option<StoredHost>, sqlx::Error> {
     sqlx::query_as::<_, StoredHost>(
         r#"SELECT host_id,name,address,web_port,username,secret,verify_tls,position,
                   created_at_micros,updated_at_micros
-           FROM sunshine.hosts WHERE host_id=$1"#,
+           FROM hosts WHERE host_id=?"#,
     )
     .bind(id)
     .fetch_optional(pool)
@@ -344,13 +326,13 @@ pub(crate) async fn get_stored_host(
 }
 
 pub(crate) async fn get_stored_host_for_update(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     id: &str,
 ) -> Result<Option<StoredHost>, sqlx::Error> {
     sqlx::query_as::<_, StoredHost>(
         r#"SELECT host_id,name,address,web_port,username,secret,verify_tls,position,
                   created_at_micros,updated_at_micros
-           FROM sunshine.hosts WHERE host_id=$1 FOR UPDATE"#,
+           FROM hosts WHERE host_id=?"#,
     )
     .bind(id)
     .fetch_optional(&mut **transaction)
@@ -358,14 +340,14 @@ pub(crate) async fn get_stored_host_for_update(
 }
 
 pub(crate) async fn insert_stored(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     row: &StoredHost,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        r#"INSERT INTO sunshine.hosts(
+        r#"INSERT INTO hosts(
                host_id,name,address,web_port,username,secret,verify_tls,position,
                created_at_micros,updated_at_micros)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"#,
+           VALUES(?,?,?,?,?,?,?,?,?,?)"#,
     )
     .bind(&row.host_id)
     .bind(&row.name)
@@ -383,13 +365,13 @@ pub(crate) async fn insert_stored(
 }
 
 pub(crate) async fn update_stored(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     row: &StoredHost,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        r#"UPDATE sunshine.hosts SET name=$2,address=$3,web_port=$4,username=$5,
-             secret=$6,verify_tls=$7,position=$8,created_at_micros=$9,updated_at_micros=$10
-           WHERE host_id=$1"#,
+        r#"UPDATE hosts SET name=?,address=?,web_port=?,username=?,
+             secret=?,verify_tls=?,position=?,created_at_micros=?,updated_at_micros=?
+           WHERE host_id=?"#,
     )
     .bind(&row.host_id)
     .bind(&row.name)
@@ -407,14 +389,14 @@ pub(crate) async fn update_stored(
 }
 
 pub(crate) async fn insert_audit(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     action: &str,
     target: &str,
     actor: &str,
     detail: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO sunshine.audit_logs(action,target,detail,actor,created_at_micros) VALUES($1,$2,$3,$4,$5)",
+        "INSERT INTO audit_logs(action,target,detail,actor,created_at_micros) VALUES(?,?,?,?,?)",
     )
     .bind(action)
     .bind(target)
