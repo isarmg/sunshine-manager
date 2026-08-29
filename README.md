@@ -9,7 +9,10 @@ its business code into Core or the Web Shell; Union remains the only public
 gateway.
 
 The repository-root package contract is described by `manifest.json`, `permissions.json`,
-`config/schema.json`, `version.json`, `frontend/` and the module-owned `migrations/`. Builder
+`config/schema.json`, `version.json`, `frontend/` and the module-owned `migrations/`. The
+maintainable React/TypeScript source lives in `module-web/`; its deterministic build writes the
+ESM entry, lazy chunk and stylesheet consumed from `frontend/`. React itself is never bundled:
+the entry activates against the single runtime injected by Union Web Shell. Builder
 decides whether this package is present in an immutable Union release; at runtime Union may enable
 or stop only packages already present in that release and never downloads replacement business
 code.
@@ -74,8 +77,15 @@ cargo fmt --all -- --check
 cargo check --locked --all-targets
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
-node --test frontend/entry.test.mjs
+cd module-web
+npm ci
+npm test
 ```
+
+The module frontend retains the original Union card-and-adjacent-panel workflow: inline host
+editing, application and client management, PIN pairing, JSON configuration, system operations
+and per-host logs. All browser calls use the Manifest-owned
+`/api/modules/sunshine` gateway namespace; write controls are gated by module RBAC.
 
 This source repository may be versioned and built independently for composition
 purposes, but only the complete Union distribution is an operator-facing release.

@@ -41,11 +41,11 @@
     "api_base": "/api/modules/sunshine",
     "routes": [
       { "path": "/modules/sunshine", "component": "SunshineView", "permission": "sunshine.hosts.read" },
-      { "path": "/modules/sunshine/logs", "component": "SunshineLogsView", "permission": "sunshine.hosts.read" }
+      { "path": "/modules/sunshine/logs", "component": "SunshineLogsView", "permission": "sunshine.proxy.use" }
     ],
     "menu": [
       { "id": "overview", "label": "Sunshine", "route": "/modules/sunshine", "permission": "sunshine.hosts.read", "order": 50 },
-      { "id": "logs", "label": "Sunshine 日志", "route": "/modules/sunshine/logs", "permission": "sunshine.hosts.read", "order": 51 }
+      { "id": "logs", "label": "Sunshine 日志", "route": "/modules/sunshine/logs", "permission": "sunshine.proxy.use", "order": 51 }
     ]
   },
   "permissions": [

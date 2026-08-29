@@ -37,5 +37,13 @@ jobs:
         with:
           node-version: 26.7.0
           check-latest: false
-      - name: Test Web Shell module entry
-        run: node --test frontend/entry.test.mjs
+          cache: npm
+          cache-dependency-path: module-web/package-lock.json
+      - name: Install module frontend dependencies
+        working-directory: module-web
+        run: npm ci
+      - name: Build and test the dynamic frontend
+        working-directory: module-web
+        run: npm test
+      - name: Verify committed frontend artifacts are current
+        run: git diff --exit-code -- frontend
