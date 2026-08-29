@@ -3,8 +3,8 @@
 //! It owns its PostgreSQL schema, local administrator sessions and upstream
 //! Sunshine credentials.
 
-pub mod auth;
 pub mod application;
+pub mod auth;
 pub mod cli;
 pub mod client;
 pub mod config;

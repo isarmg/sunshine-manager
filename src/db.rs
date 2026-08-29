@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sqlx::{SqlitePool, Sqlite, Transaction, migrate::Migrator, sqlite::SqlitePoolOptions};
+use sqlx::{Sqlite, SqlitePool, Transaction, migrate::Migrator, sqlite::SqlitePoolOptions};
 
 use crate::{
     crypto::SecretBox,
@@ -105,21 +105,15 @@ pub async fn ensure_admin_user(
     Ok(())
 }
 
-pub async fn reset_admin_password(
-    pool: &SqlitePool,
-    email: &str,
-    password: &str,
-) -> AppResult<()> {
+pub async fn reset_admin_password(pool: &SqlitePool, email: &str, password: &str) -> AppResult<()> {
     let normalized = email.trim().to_lowercase();
     let password_hash = crate::auth::hash_password(password)
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    let result = sqlx::query(
-        "UPDATE auth_users SET password_hash=? WHERE email=?",
-    )
-    .bind(password_hash)
-    .bind(normalized)
-    .execute(pool)
-    .await?;
+    let result = sqlx::query("UPDATE auth_users SET password_hash=? WHERE email=?")
+        .bind(password_hash)
+        .bind(normalized)
+        .execute(pool)
+        .await?;
     if result.rows_affected() != 1 {
         return Err(AppError::NotFound(format!(
             "no active or existing user matched {email}"
@@ -160,10 +154,9 @@ pub async fn insert_host(
     let now = now_micros()?;
     let mut transaction = pool.begin().await?;
     lock_writes(&mut transaction).await?;
-    let position: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM hosts")
-            .fetch_one(&mut *transaction)
-            .await?;
+    let position: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM hosts")
+        .fetch_one(&mut *transaction)
+        .await?;
     let host = Host {
         id: uuid::Uuid::new_v4().to_string(),
         name: request.name.trim().to_string(),

@@ -137,10 +137,11 @@ async fn authenticate(
     if path.starts_with("/health/") || path.starts_with("/api/v1/auth/") {
         return Ok(next.run(request).await);
     }
-    let token = crate::auth::parse_cookie_token(request.headers())
-        .ok_or(AppError::Unauthorized)?;
+    let token = crate::auth::parse_cookie_token(request.headers()).ok_or(AppError::Unauthorized)?;
     let subject = state.auth.verify_session(&token)?;
-    request.extensions_mut().insert(InternalIdentity { subject });
+    request
+        .extensions_mut()
+        .insert(InternalIdentity { subject });
     Ok(next.run(request).await)
 }
 
@@ -189,21 +190,13 @@ async fn login(
     let cookie = state.auth.session_cookie(&token);
     let value = HeaderValue::from_str(&cookie)
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    Ok((
-        StatusCode::NO_CONTENT,
-        [(header::SET_COOKIE, value)],
-    )
-        .into_response())
+    Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, value)]).into_response())
 }
 
 async fn logout(State(state): State<WorkerState>) -> Response {
     let cookie = state.auth.expired_session_cookie();
     let value = HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""));
-    (
-        StatusCode::NO_CONTENT,
-        [(header::SET_COOKIE, value)],
-    )
-        .into_response()
+    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, value)]).into_response()
 }
 
 async fn session(

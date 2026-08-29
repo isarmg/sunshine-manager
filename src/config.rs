@@ -1,8 +1,4 @@
-use std::{
-    env,
-    net::SocketAddr,
-    time::Duration,
-};
+use std::{env, net::SocketAddr, time::Duration};
 
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -31,10 +27,8 @@ impl ServeConfig {
         let session_secret = STANDARD
             .decode(required("SUNSHINE_MANAGER_SESSION_SECRET")?)
             .context("SUNSHINE_MANAGER_SESSION_SECRET must be base64")?;
-        let session_ttl = Duration::from_secs(parse_u64(
-            "SUNSHINE_MANAGER_SESSION_TTL_SECONDS",
-            43_200,
-        )?);
+        let session_ttl =
+            Duration::from_secs(parse_u64("SUNSHINE_MANAGER_SESSION_TTL_SECONDS", 43_200)?);
         let cookie_secure = parse_bool("SUNSHINE_MANAGER_SESSION_COOKIE_SECURE", false)?;
 
         Ok(Self {
@@ -61,9 +55,9 @@ fn decode_key(value: &str) -> anyhow::Result<[u8; 32]> {
     let decoded = STANDARD
         .decode(value.trim())
         .context("SUNSHINE_MANAGER_CREDENTIAL_KEY must be base64")?;
-    decoded
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("SUNSHINE_MANAGER_CREDENTIAL_KEY must decode to exactly 32 bytes"))
+    decoded.try_into().map_err(|_| {
+        anyhow::anyhow!("SUNSHINE_MANAGER_CREDENTIAL_KEY must decode to exactly 32 bytes")
+    })
 }
 
 fn required(name: &str) -> anyhow::Result<String> {
