@@ -154,7 +154,6 @@ pub async fn insert_host(
     validate_host_request(&request, production)?;
     let now = now_micros()?;
     let mut transaction = pool.begin().await?;
-    lock_writes(&mut transaction).await?;
     let position: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM hosts")
         .fetch_one(&mut *transaction)
         .await?;
@@ -202,7 +201,6 @@ pub async fn update_host(
     }
     let update_password = patch.password.is_some();
     let mut transaction = pool.begin().await?;
-    lock_writes(&mut transaction).await?;
     let row = get_stored_host_for_update(&mut transaction, id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Sunshine host '{id}' does not exist")))?;
@@ -259,7 +257,6 @@ pub async fn update_host(
 
 pub async fn delete_host(pool: &SqlitePool, id: &str, actor: &str) -> AppResult<()> {
     let mut transaction = pool.begin().await?;
-    lock_writes(&mut transaction).await?;
     let result = sqlx::query("DELETE FROM hosts WHERE host_id=?")
         .bind(id)
         .execute(&mut *transaction)
@@ -297,12 +294,6 @@ pub async fn audit_best_effort(
     if let Err(error) = result {
         tracing::warn!(%error, action, target, "upstream mutation succeeded but audit insert failed");
     }
-}
-
-pub(crate) async fn lock_writes(
-    _transaction: &mut Transaction<'_, Sqlite>,
-) -> Result<(), sqlx::Error> {
-    Ok(())
 }
 
 pub(crate) async fn get_stored_host(
@@ -364,7 +355,7 @@ pub(crate) async fn update_stored(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"UPDATE hosts SET name=?,address=?,web_port=?,username=?,
-             secret=?,verify_tls=?,position=?,created_at_micros=?,updated_at_micros=?
+             secret=?,verify_tls=?,position=?,updated_at_micros=?
            WHERE host_id=?"#,
     )
     .bind(&row.name)
@@ -374,7 +365,6 @@ pub(crate) async fn update_stored(
     .bind(&row.secret)
     .bind(row.verify_tls)
     .bind(row.position)
-    .bind(row.created_at_micros)
     .bind(row.updated_at_micros)
     .bind(&row.host_id)
     .execute(&mut **transaction)
@@ -512,6 +502,7 @@ mod tests {
         assert_eq!(updated.web_port, 48_000);
         assert_eq!(updated.username, "operator");
         assert_eq!(updated.password, "rotated-secret");
+        assert_eq!(updated.created_at_micros, created.created_at_micros);
         assert_eq!(
             get_host(&pool, &secrets, &created.id).await.unwrap(),
             updated
