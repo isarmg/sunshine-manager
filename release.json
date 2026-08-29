@@ -1,0 +1,6 @@
+{
+  "application": "sunshine-manager",
+  "version": "0.6.0",
+  "database_schema": 3,
+  "target": "x86_64-unknown-linux-gnu"
+}

@@ -1085,6 +1085,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
+name = "isarmg-auth"
+version = "0.1.0"
+source = "git+https://github.com/isarmg/isarmg-foundation.git?rev=a9a38c8f40ec6d17e482ffda25b455465ce2daf7#a9a38c8f40ec6d17e482ffda25b455465ce2daf7"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "base64",
+ "hmac",
+ "http",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2331,6 +2345,7 @@ dependencies = [
  "clap",
  "hmac",
  "http-body-util",
+ "isarmg-auth",
  "reqwest",
  "serde",
  "serde_json",

@@ -21,6 +21,10 @@ enum Command {
     Serve,
     /// Apply the module-owned PostgreSQL migrations.
     Migrate(DatabaseArgs),
+    /// Create the initial local administrator.
+    AdminCreate(DatabaseArgs),
+    /// Run a deployment health check against the configured instance.
+    Doctor,
 }
 
 #[derive(clap::Args)]
@@ -43,6 +47,30 @@ async fn main() -> anyhow::Result<()> {
             let pool = db::connect(&args.database_url).await?;
             db::migrate(&pool).await?;
             println!("{{\"status\":\"migrated\",\"schema\":\"sunshine\"}}");
+            Ok(())
+        }
+        Command::AdminCreate(args) => {
+            let pool = db::connect(&args.database_url).await?;
+            db::migrate(&pool).await?;
+            let email = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL")
+                .unwrap_or_else(|_| "admin@example.com".to_string());
+            let password = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD").ok();
+            db::ensure_admin_user(&pool, &email, password.as_deref()).await?;
+            println!("{{\"status\":\"admin-ready\",\"email\":{email:?}}}");
+            Ok(())
+        }
+        Command::Doctor => {
+            let config = ServeConfig::from_runtime()?;
+            let pool = db::connect(&config.database_url).await?;
+            let database_ready = db::ready(&pool).await;
+            println!(
+                "{{\"status\":\"{}\",\"bind\":\"{}\",\"database_ready\":{database_ready}}}",
+                if database_ready { "ok" } else { "degraded" },
+                config.bind
+            );
+            if !database_ready {
+                anyhow::bail!("database is not ready");
+            }
             Ok(())
         }
     }

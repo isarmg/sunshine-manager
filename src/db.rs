@@ -104,7 +104,8 @@ pub async fn ensure_admin_user(
         )
     })?;
     let normalized = email.trim().to_lowercase();
-    let password_hash = crate::auth::hash_password(password)?;
+    let password_hash = crate::auth::hash_password(password)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
     sqlx::query(
         "INSERT INTO sunshine.auth_users(user_id,email,password_hash,active,created_at_micros) \
          VALUES($1,$2,$3,true,$4)",

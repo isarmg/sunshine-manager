@@ -1,0 +1,26 @@
+[Unit]
+Description=Sunshine Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=isarmg-sunshine
+Group=isarmg-sunshine
+ExecStart=/opt/isarmg/sunshine-manager/current/bin/sunshine-manager serve
+StateDirectory=isarmg/sunshine-manager
+RuntimeDirectory=isarmg/sunshine-manager
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
