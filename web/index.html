@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sunshine Manager</title>
+  </head>
+  <body>
+    <main>
+      <h1>Sunshine Manager</h1>
+      <form id="login">
+        <input name="email" type="email" placeholder="admin@example.com" required />
+        <input name="password" type="password" placeholder="password" required />
+        <button>登录</button>
+      </form>
+      <section id="content" hidden>
+        <button id="logout">退出</button>
+        <pre id="hosts"></pre>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,17 +1,18 @@
 [package]
-name = "unionc-sunshine-worker"
+name = "sunshine-manager"
 version = "0.6.0"
 edition = "2024"
 rust-version = "1.98"
 authors = ["sarmg <isarmg@163.com>"]
 license = "Apache-2.0"
-repository = "https://github.com/isarmg/sunshine-worker"
-description = "Private Sunshine process module compiled and supervised by UnionC"
+repository = "https://github.com/isarmg/sunshine-manager"
+description = "Independent Sunshine manager with local authentication"
 publish = false
 
 [dependencies]
 aes-gcm = "0.10"
 anyhow = "1"
+argon2 = { version = "0.5", features = ["std"] }
 axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
@@ -34,13 +35,10 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v4"] }
-sarmg-platform-core = { git = "https://github.com/isarmg/sarmg-platform.git", rev = "e7332a13d8ad5a08c7d7115a58a0fa47582c0bef" }
-sarmg-platform-gateway = { git = "https://github.com/isarmg/sarmg-platform.git", rev = "e7332a13d8ad5a08c7d7115a58a0fa47582c0bef" }
-sarmg-platform-sdk = { git = "https://github.com/isarmg/sarmg-platform.git", rev = "e7332a13d8ad5a08c7d7115a58a0fa47582c0bef" }
 
 [dev-dependencies]
 http-body-util = "0.1"

@@ -64,6 +64,60 @@ pub async fn ready(pool: &PgPool) -> bool {
     .unwrap_or(false)
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct StoredUser {
+    pub user_id: uuid::Uuid,
+    pub email: String,
+    pub password_hash: String,
+    pub active: bool,
+}
+
+pub async fn find_active_user_by_email(
+    pool: &PgPool,
+    email: &str,
+) -> AppResult<Option<StoredUser>> {
+    let normalized = email.trim().to_lowercase();
+    let row = sqlx::query_as::<_, StoredUser>(
+        "SELECT user_id,email,password_hash,active FROM sunshine.auth_users \
+         WHERE email=$1 AND active=true",
+    )
+    .bind(normalized)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn ensure_admin_user(
+    pool: &PgPool,
+    email: &str,
+    password: Option<&str>,
+) -> AppResult<()> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sunshine.auth_users")
+        .fetch_one(pool)
+        .await?;
+    if count > 0 {
+        return Ok(());
+    }
+    let password = password.ok_or_else(|| {
+        AppError::BadRequest(
+            "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD is required while no users exist".into(),
+        )
+    })?;
+    let normalized = email.trim().to_lowercase();
+    let password_hash = crate::auth::hash_password(password)?;
+    sqlx::query(
+        "INSERT INTO sunshine.auth_users(user_id,email,password_hash,active,created_at_micros) \
+         VALUES($1,$2,$3,true,$4)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(normalized)
+    .bind(password_hash)
+    .bind(now_micros()?)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn list_hosts(pool: &PgPool, secrets: &SecretBox) -> AppResult<Vec<Host>> {
     let rows = sqlx::query_as::<_, StoredHost>(
         r#"SELECT host_id,name,address,web_port,username,secret,verify_tls,position,

@@ -1,8 +1,7 @@
-//! Sunshine's private UnionC worker.
+//! Sunshine Manager is an independent service for managing Sunshine hosts.
 //!
-//! The worker owns its PostgreSQL schema and upstream Sunshine credentials. It
-//! deliberately has no dependency on UnionC's SQLite database, sessions,
-//! cookies or `AppState`.
+//! It owns its PostgreSQL schema, local administrator sessions and upstream
+//! Sunshine credentials.
 
 pub mod auth;
 pub mod client;

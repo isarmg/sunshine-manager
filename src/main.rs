@@ -1,14 +1,14 @@
 use clap::{Parser, Subcommand};
-use unionc_sunshine_worker::{
+use sunshine_manager::{
     ServeConfig, db,
     http::{WorkerState, probe_loop, router},
 };
 
 #[derive(Parser)]
 #[command(
-    name = "sunshine-worker",
+    name = "sunshine-manager",
     version,
-    about = "UnionC private Sunshine module worker"
+    about = "Independent Sunshine manager"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "unionc_sunshine_worker=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "sunshine_manager=info,tower_http=info".into()),
         )
         .init();
     match Cli::parse().command.unwrap_or(Command::Serve) {
@@ -52,6 +52,12 @@ async fn serve() -> anyhow::Result<()> {
     let config = ServeConfig::from_runtime()?;
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;
+    db::ensure_admin_user(
+        &pool,
+        &config.bootstrap_admin_email,
+        config.bootstrap_admin_password.as_deref(),
+    )
+    .await?;
     let state = WorkerState::new(
         pool,
         config.secrets,
@@ -59,7 +65,7 @@ async fn serve() -> anyhow::Result<()> {
         config.production,
     )?;
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    tracing::info!(bind = %config.bind, schema = db::SCHEMA, "Sunshine private worker ready");
+    tracing::info!(bind = %config.bind, schema = db::SCHEMA, "Sunshine manager ready");
     let probe = tokio::spawn(probe_loop(state.clone()));
     let result = axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown())

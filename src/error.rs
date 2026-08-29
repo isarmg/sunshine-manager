@@ -14,8 +14,6 @@ pub enum AppError {
     BadRequest(String),
     #[error("unauthorized")]
     Unauthorized,
-    #[error("request must pass through the Union gateway")]
-    GatewayRequired,
     #[error("{0}")]
     Forbidden(String),
     #[error("{0}")]
@@ -42,7 +40,7 @@ impl AppError {
     fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Unauthorized | Self::GatewayRequired => StatusCode::UNAUTHORIZED,
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
@@ -56,7 +54,6 @@ impl AppError {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::Unauthorized => "unauthorized",
-            Self::GatewayRequired => "union_gateway_required",
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
@@ -84,7 +81,6 @@ impl IntoResponse for AppError {
             | Self::Conflict(message)
             | Self::Upstream(message) => message.clone(),
             Self::Unauthorized => "unauthorized".to_string(),
-            Self::GatewayRequired => "request must pass through the Union gateway".to_string(),
             Self::Database(_) => "database unavailable".to_string(),
             Self::Crypto | Self::Internal(_) => "internal error".to_string(),
         };

@@ -11,10 +11,10 @@ use axum::{
 use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
+use tower_http::services::ServeDir;
 
 use crate::{
     InternalAuth, InternalIdentity,
-    auth::{AUDIENCE_HEADER, PREFIX_HEADER, PRINCIPAL_HEADER, PROTOCOL_HEADER, TOKEN_HEADER},
     client::UpstreamClient,
     crypto::SecretBox,
     db,
@@ -57,6 +57,9 @@ pub fn router(state: WorkerState) -> Router {
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .route("/api/v1/auth/login", post(login))
+        .route("/api/v1/auth/logout", post(logout))
+        .route("/api/v1/auth/session", get(session))
         .route(
             "/api/services/sunshine/hosts",
             get(list_hosts).post(create_host),
@@ -119,6 +122,9 @@ pub fn router(state: WorkerState) -> Router {
         )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .fallback_service(ServeDir::new(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web"),
+        ))
         .with_state(state)
 }
 
@@ -127,42 +133,20 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> AppResult<Response> {
-    // Union must consume its browser session and strip it at the gateway. A
-    // Cookie reaching this process indicates a broken trust boundary.
-    if request.headers().contains_key(header::COOKIE) {
-        return Err(AppError::Unauthorized);
+    let path = request.uri().path().to_string();
+    if path.starts_with("/health/") || path.starts_with("/api/v1/auth/") {
+        return Ok(next.run(request).await);
     }
-    if !state.auth.validates(request.headers()) {
-        return Err(AppError::GatewayRequired);
-    }
-    if !request.uri().path().starts_with("/health/") {
-        let subject = crate::auth::parse_principal(request.headers())
-            .map_err(|_| AppError::Unauthorized)?
-            .to_owned();
-        request
-            .extensions_mut()
-            .insert(InternalIdentity { subject });
-    }
-    // The business handlers and upstream Sunshine client never need Union's
-    // proof or browser-facing credentials after this trust transition.
-    for name in [
-        PROTOCOL_HEADER,
-        AUDIENCE_HEADER,
-        TOKEN_HEADER,
-        PREFIX_HEADER,
-        PRINCIPAL_HEADER,
-    ] {
-        request.headers_mut().remove(name);
-    }
-    request.headers_mut().remove(header::AUTHORIZATION);
+    let token = crate::auth::parse_cookie_token(request.headers())
+        .ok_or(AppError::Unauthorized)?;
+    let subject = state.auth.verify_session(&token)?;
+    request.extensions_mut().insert(InternalIdentity { subject });
     Ok(next.run(request).await)
 }
 
 async fn live(State(state): State<WorkerState>) -> Response {
-    with_module_identity(
-        &state,
-        Json(serde_json::json!({ "status": "ok" })).into_response(),
-    )
+    let _ = state;
+    Json(serde_json::json!({ "status": "ok" })).into_response()
 }
 
 async fn ready(State(state): State<WorkerState>) -> Response {
@@ -180,12 +164,67 @@ async fn ready(State(state): State<WorkerState>) -> Response {
         )
             .into_response()
     };
-    with_module_identity(&state, response)
+    let _ = state;
+    response
 }
 
-fn with_module_identity(state: &WorkerState, mut response: Response) -> Response {
-    state.auth.apply_health_headers(response.headers_mut());
-    response
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+async fn login(
+    State(state): State<WorkerState>,
+    Json(request): Json<LoginRequest>,
+) -> AppResult<Response> {
+    let user = db::find_active_user_by_email(&state.pool, &request.email)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    if !crate::auth::verify_password(&request.password, &user.password_hash) {
+        return Err(AppError::Unauthorized);
+    }
+    let token = state.auth.issue_session(&user.user_id.to_string())?;
+    let cookie = state.auth.session_cookie(&token);
+    let value = HeaderValue::from_str(&cookie)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, value)],
+    )
+        .into_response())
+}
+
+async fn logout(State(state): State<WorkerState>) -> Response {
+    let cookie = state.auth.expired_session_cookie();
+    let value = HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static(""));
+    (
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, value)],
+    )
+        .into_response()
+}
+
+async fn session(
+    State(state): State<WorkerState>,
+    Extension(identity): Extension<InternalIdentity>,
+) -> AppResult<Json<serde_json::Value>> {
+    let user = sqlx::query_scalar::<_, String>(
+        "SELECT email FROM sunshine.auth_users WHERE user_id=$1 AND active=true",
+    )
+    .bind(
+        uuid::Uuid::parse_str(&identity.subject)
+            .map_err(|_| AppError::Unauthorized)?,
+    )
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|_| AppError::Unauthorized)?;
+    Ok(Json(serde_json::json!({
+        "authenticated": true,
+        "user_id": identity.subject,
+        "email": user
+    })))
 }
 
 async fn list_hosts(State(state): State<WorkerState>) -> AppResult<Json<Vec<HostInfo>>> {
@@ -728,9 +767,7 @@ pub async fn probe_loop(state: WorkerState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{AUDIENCE, PREFIX, PROTOCOL};
     use axum::body::Body;
-    use http_body_util::BodyExt;
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;
 
@@ -741,8 +778,7 @@ mod tests {
         let state = WorkerState::new(
             pool,
             SecretBox::new("test", [2; 32]).unwrap(),
-            InternalAuth::new(PROTOCOL, AUDIENCE, "a".repeat(64), PREFIX, AUDIENCE, PREFIX)
-                .unwrap(),
+            InternalAuth::new(vec![2; 32], std::time::Duration::from_secs(60), false).unwrap(),
             true,
         )
         .unwrap();
@@ -750,12 +786,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_routes_including_health_require_the_gateway_contract() {
+    async fn health_is_public() {
         let live = test_router()
             .oneshot(Request::get("/health/live").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(live.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(live.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn private_route_requires_a_session_cookie() {
         let private = test_router()
             .oneshot(
                 Request::get("/api/services/sunshine/hosts")
@@ -768,72 +808,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_gateway_proof_still_rejects_union_cookie() {
-        let path = "/does-not-exist";
+    async fn auth_route_is_public() {
         let response = test_router()
             .oneshot(
-                Request::get(path)
-                    .header(PROTOCOL_HEADER, PROTOCOL)
-                    .header(AUDIENCE_HEADER, AUDIENCE)
-                    .header(TOKEN_HEADER, "a".repeat(64))
-                    .header(PREFIX_HEADER, PREFIX)
-                    .header(header::COOKIE, "union_session=browser")
-                    .body(Body::empty())
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"email":"admin@example.com","password":"bad-password"}"#,
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8_lossy(&body).contains("unauthorized"));
-    }
-
-    #[tokio::test]
-    async fn authenticated_health_echoes_protocol_and_audience() {
-        let response = test_router()
-            .oneshot(
-                Request::get("/health/live")
-                    .header(PROTOCOL_HEADER, PROTOCOL)
-                    .header(AUDIENCE_HEADER, AUDIENCE)
-                    .header(TOKEN_HEADER, "a".repeat(64))
-                    .header(PREFIX_HEADER, PREFIX)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[PROTOCOL_HEADER], PROTOCOL);
-        assert_eq!(response.headers()[AUDIENCE_HEADER], AUDIENCE);
-    }
-
-    #[tokio::test]
-    async fn platform_routes_require_the_canonical_operator_principal() {
-        let without_principal = test_router()
-            .oneshot(
-                Request::get("/does-not-exist")
-                    .header(PROTOCOL_HEADER, PROTOCOL)
-                    .header(AUDIENCE_HEADER, AUDIENCE)
-                    .header(TOKEN_HEADER, "a".repeat(64))
-                    .header(PREFIX_HEADER, PREFIX)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(without_principal.status(), StatusCode::UNAUTHORIZED);
-
-        let mut request = Request::get("/does-not-exist")
-            .header(PROTOCOL_HEADER, PROTOCOL)
-            .header(AUDIENCE_HEADER, AUDIENCE)
-            .header(TOKEN_HEADER, "a".repeat(64))
-            .header(PREFIX_HEADER, PREFIX)
-            .body(Body::empty())
-            .unwrap();
-        sarmg_platform_gateway::insert_principal(request.headers_mut(), "管理员").unwrap();
-        assert_eq!(
-            test_router().oneshot(request).await.unwrap().status(),
-            StatusCode::NOT_FOUND
-        );
     }
 }

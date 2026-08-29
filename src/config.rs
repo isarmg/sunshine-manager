@@ -1,8 +1,11 @@
-use std::net::SocketAddr;
+use std::{
+    env,
+    net::SocketAddr,
+    time::Duration,
+};
 
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::Deserialize;
 
 use crate::{auth::InternalAuth, crypto::SecretBox};
 
@@ -13,37 +16,45 @@ pub struct ServeConfig {
     pub production: bool,
     pub internal_auth: InternalAuth,
     pub secrets: SecretBox,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RuntimeConfiguration {
-    database_url: String,
-    credential_key: String,
-    #[serde(default = "default_credential_key_id")]
-    credential_key_id: String,
-    #[serde(default = "default_production")]
-    production: bool,
+    pub bootstrap_admin_email: String,
+    pub bootstrap_admin_password: Option<String>,
 }
 
 impl ServeConfig {
     pub fn from_runtime() -> anyhow::Result<Self> {
-        let manifest =
-            sarmg_platform_core::PluginManifest::parse_json(include_str!("../manifest.json"))?;
-        let context = sarmg_platform_sdk::ProcessContext::from_env(&manifest)?;
-        let configuration: RuntimeConfiguration = context.load_configuration()?;
-        if !configuration.database_url.starts_with("postgresql://")
-            && !configuration.database_url.starts_with("postgres://")
+        let database_url = required("SUNSHINE_MANAGER_DATABASE_URL")?;
+        if !database_url.starts_with("postgresql://")
+            && !database_url.starts_with("postgres://")
         {
-            anyhow::bail!("Sunshine requires a PostgreSQL database URL");
+            anyhow::bail!("SUNSHINE_MANAGER_DATABASE_URL must be a PostgreSQL URL");
         }
-        let credential_key = decode_key(&configuration.credential_key)?;
+
+        let credential_key = decode_key(&required("SUNSHINE_MANAGER_CREDENTIAL_KEY")?)?;
+        let session_secret = STANDARD
+            .decode(required("SUNSHINE_MANAGER_SESSION_SECRET")?)
+            .context("SUNSHINE_MANAGER_SESSION_SECRET must be base64")?;
+        let session_ttl = Duration::from_secs(parse_u64(
+            "SUNSHINE_MANAGER_SESSION_TTL_SECONDS",
+            43_200,
+        )?);
+        let cookie_secure = parse_bool("SUNSHINE_MANAGER_SESSION_COOKIE_SECURE", false)?;
+
         Ok(Self {
-            bind: context.bind,
-            database_url: configuration.database_url,
-            production: configuration.production,
-            internal_auth: InternalAuth::from_env(crate::auth::AUDIENCE, crate::auth::PREFIX)?,
-            secrets: SecretBox::new(configuration.credential_key_id, credential_key)?,
+            bind: value("SUNSHINE_MANAGER_BIND", "127.0.0.1:18104")
+                .parse()
+                .context("SUNSHINE_MANAGER_BIND must be a socket address")?,
+            database_url,
+            production: parse_bool("SUNSHINE_MANAGER_PRODUCTION", true)?,
+            internal_auth: InternalAuth::new(session_secret, session_ttl, cookie_secure)?,
+            secrets: SecretBox::new(
+                value("SUNSHINE_MANAGER_CREDENTIAL_KEY_ID", "primary"),
+                credential_key,
+            )?,
+            bootstrap_admin_email: value(
+                "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL",
+                "admin@example.com",
+            ),
+            bootstrap_admin_password: env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD").ok(),
         })
     }
 }
@@ -51,41 +62,39 @@ impl ServeConfig {
 fn decode_key(value: &str) -> anyhow::Result<[u8; 32]> {
     let decoded = STANDARD
         .decode(value.trim())
-        .context("credential_key must be base64")?;
+        .context("SUNSHINE_MANAGER_CREDENTIAL_KEY must be base64")?;
     decoded
         .try_into()
-        .map_err(|_| anyhow::anyhow!("credential_key must decode to exactly 32 bytes"))
+        .map_err(|_| anyhow::anyhow!("SUNSHINE_MANAGER_CREDENTIAL_KEY must decode to exactly 32 bytes"))
 }
 
-fn default_credential_key_id() -> String {
-    "primary".into()
+fn required(name: &str) -> anyhow::Result<String> {
+    env::var(name).with_context(|| format!("{name} is required"))
 }
 
-const fn default_production() -> bool {
-    true
+fn value(name: &str, default: &str) -> String {
+    env::var(name).unwrap_or_else(|_| default.to_string())
+}
+
+fn parse_u64(name: &str, default: u64) -> anyhow::Result<u64> {
+    value(name, &default.to_string())
+        .parse()
+        .with_context(|| format!("{name} must be an unsigned integer"))
+}
+
+fn parse_bool(name: &str, default: bool) -> anyhow::Result<bool> {
+    value(name, if default { "true" } else { "false" })
+        .parse()
+        .with_context(|| format!("{name} must be true or false"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{AUDIENCE, PREFIX, PROTOCOL};
 
     #[test]
-    fn configuration_defaults_are_current_only() {
-        let configuration: RuntimeConfiguration = serde_json::from_value(serde_json::json!({
-            "database_url": "postgresql://localhost/sunshine",
-            "credential_key": STANDARD.encode([7_u8; 32])
-        }))
-        .unwrap();
-        assert!(configuration.production);
-        assert_eq!(configuration.credential_key_id, "primary");
-        assert_eq!(decode_key(&configuration.credential_key).unwrap(), [7; 32]);
-    }
-
-    #[test]
-    fn compiled_gateway_identity_is_fixed() {
-        assert_eq!(PROTOCOL, "gateway-v1");
-        assert_eq!(AUDIENCE, "sunshine");
-        assert_eq!(PREFIX, "/api/modules/sunshine");
+    fn credential_key_decoding_requires_exactly_32_bytes() {
+        assert!(decode_key(&STANDARD.encode([7_u8; 32])).is_ok());
+        assert!(decode_key(&STANDARD.encode([7_u8; 31])).is_err());
     }
 }

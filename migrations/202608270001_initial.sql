@@ -1,5 +1,5 @@
 -- Owned and versioned by the Sunshine module. The deployment role provisions
--- the `sunshine` schema; sarmg-platform-postgres sets search_path here before
+-- the `sunshine` schema; the server sets search_path here before
 -- SQLx executes this migration.
 
 CREATE TABLE hosts (
