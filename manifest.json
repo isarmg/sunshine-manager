@@ -1,27 +1,21 @@
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "id": "sunshine",
   "display_name": "Sunshine",
   "description": "Sunshine 主机配置、状态探测和 API 代理",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "version_metadata": { "channel": "development", "distribution": "bundled", "license": "Apache-2.0" },
   "compatibility": {
-    "core": ">=0.5.0, <0.6.0",
+    "core": ">=0.6.0, <0.7.0",
     "platform_api": "^1.0.0",
-    "plugin_api": "^1.0.0"
+    "plugin_api": "^2.0.0"
   },
   "dependencies": [],
   "execution": {
     "mode": "process",
     "executable": "backend/sunshine",
     "args": [],
-    "environment": [
-      { "name": "SUNSHINE_DATABASE_URL", "config_pointer": "/database_url" },
-      { "name": "SUNSHINE_CREDENTIAL_KEY", "config_pointer": "/credential_key" },
-      { "name": "SUNSHINE_CREDENTIAL_KEY_ID", "config_pointer": "/credential_key_id" },
-      { "name": "SUNSHINE_PRODUCTION", "config_pointer": "/production" }
-    ],
-    "bind": { "host": "127.0.0.1", "port": 18104, "environment": "SUNSHINE_BIND" }
+    "bind": { "host": "127.0.0.1", "port": 18104 }
   },
   "backend": {
     "api_version": "v1",
@@ -54,11 +48,11 @@
     { "id": "sunshine.proxy.use", "description": "调用 Sunshine 代理 API", "default_roles": ["admin"] }
   ],
   "migrations": [
-    { "id": "schema-v1", "engine": "postgresql", "directory": "migrations", "schema": "sunshine" }
+    { "id": "schema-v2", "engine": "postgresql", "directory": "migrations", "schema": "sunshine" }
   ],
   "configuration": {
     "schema": "config/schema.json",
-    "version": 1,
+    "version": 2,
     "secret_fields": ["/database_url", "/credential_key"]
   },
   "health": {

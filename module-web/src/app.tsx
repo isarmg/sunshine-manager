@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { SunshineView as LegacySunshineView } from "./features/sunshine/SunshineView";
+import { SunshineView as SunshineManagementView } from "./features/sunshine/SunshineView";
 import { LogsView } from "./features/logs/LogsView";
 import { Fragment, createElement as h } from "./runtime";
 
@@ -20,7 +20,7 @@ export function activate() {
   function SunshineView(props: ComponentProps) {
     return (
       <QueryClientProvider client={queryClient}>
-        <LegacySunshineView
+        <SunshineManagementView
           addTrigger={props.actionRequest}
           onAddTriggerHandled={props.onActionRequestHandled}
           canWrite={props.hasPermission("sunshine.hosts.write")}

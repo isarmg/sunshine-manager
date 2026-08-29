@@ -57,7 +57,7 @@ pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
 
 pub async fn ready(pool: &PgPool) -> bool {
     sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('sunshine.hosts') IS NOT NULL AND to_regclass('sunshine.import_batches') IS NOT NULL",
+        "SELECT to_regclass('sunshine.hosts') IS NOT NULL AND to_regclass('sunshine.audit_logs') IS NOT NULL",
     )
     .fetch_one(pool)
     .await
@@ -288,36 +288,6 @@ pub(crate) async fn insert_stored(
                host_id,name,address,web_port,username,secret,verify_tls,position,
                created_at_micros,updated_at_micros)
            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"#,
-    )
-    .bind(&row.host_id)
-    .bind(&row.name)
-    .bind(&row.address)
-    .bind(row.web_port)
-    .bind(&row.username)
-    .bind(&row.secret)
-    .bind(row.verify_tls)
-    .bind(row.position)
-    .bind(row.created_at_micros)
-    .bind(row.updated_at_micros)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
-pub(crate) async fn upsert_stored(
-    transaction: &mut Transaction<'_, Postgres>,
-    row: &StoredHost,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"INSERT INTO sunshine.hosts(
-               host_id,name,address,web_port,username,secret,verify_tls,position,
-               created_at_micros,updated_at_micros)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-           ON CONFLICT(host_id) DO UPDATE SET
-             name=EXCLUDED.name,address=EXCLUDED.address,web_port=EXCLUDED.web_port,
-             username=EXCLUDED.username,secret=EXCLUDED.secret,verify_tls=EXCLUDED.verify_tls,
-             position=EXCLUDED.position,created_at_micros=EXCLUDED.created_at_micros,
-             updated_at_micros=EXCLUDED.updated_at_micros"#,
     )
     .bind(&row.host_id)
     .bind(&row.name)

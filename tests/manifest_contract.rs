@@ -49,7 +49,7 @@ fn manifest_bundle_is_self_consistent() {
     let config: Value = serde_json::from_str(include_str!("../config/schema.json")).unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    assert_eq!(manifest["manifest_version"], 1);
+    assert_eq!(manifest["manifest_version"], 2);
     assert_eq!(manifest["id"], "sunshine");
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["version"], version["version"]);
@@ -70,14 +70,8 @@ fn manifest_bundle_is_self_consistent() {
     assert_eq!(config["type"], "object");
     assert_eq!(config["additionalProperties"], false);
 
-    for environment in manifest["execution"]["environment"].as_array().unwrap() {
-        let pointer = environment["config_pointer"].as_str().unwrap();
-        let property = pointer.strip_prefix('/').unwrap();
-        assert!(
-            config["properties"].get(property).is_some(),
-            "environment mapping refers to missing configuration property {property}"
-        );
-    }
+    assert!(manifest["execution"].get("environment").is_none());
+    assert!(manifest["execution"]["bind"].get("environment").is_none());
 
     let frontend = &manifest["frontend"];
     assert!(root.join(frontend["entry"].as_str().unwrap()).is_file());

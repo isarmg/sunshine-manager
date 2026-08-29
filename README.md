@@ -33,37 +33,38 @@ code.
   module's database or `AppState`.
 
 The worker preserves its internal route contract under `/api/services/sunshine/hosts`; Manifest
-v1 maps canonical `/api/modules/sunshine/*` routes without a module-specific Core branch.
+v2 maps canonical `/api/modules/sunshine/*` routes without a module-specific Core branch.
 
 ## Supervisor-supplied worker environment
 
 ```text
-SUNSHINE_DATABASE_URL=postgresql://sunshine_runtime:...@127.0.0.1/sunshine
+UNION_PLUGIN_ID=sunshine
+UNION_PLUGIN_VERSION=0.6.0
+UNION_PLUGIN_BIND=127.0.0.1:18104
+UNION_PLUGIN_PORT=18104
+UNION_PLUGIN_PACKAGE_ROOT=/opt/union/releases/<release>/modules/sunshine
+UNION_PLUGIN_CONFIG=/var/lib/union/plugins/config/sunshine.json
 UNION_MODULE_PROTOCOL=gateway-v1
 UNION_MODULE_AUDIENCE=sunshine
 UNION_MODULE_TOKEN=<64 lowercase hexadecimal characters; supplied by Union>
 UNION_MODULE_PREFIX=/api/modules/sunshine
-SUNSHINE_CREDENTIAL_KEY=<base64 32 bytes; module-owned encryption key>
-SUNSHINE_CREDENTIAL_KEY_ID=primary
-SUNSHINE_BIND=127.0.0.1:18104
-UNION_PLUGIN_BIND=127.0.0.1:18104
-SUNSHINE_PRODUCTION=true
 ```
 
 Operators do not launch this binary with that block. They store values through the module's
-`config/schema.json`; Runtime maps only Manifest-allowlisted fields, supplies the dynamic bind and
-creates the gateway identity. The expanded names above document the private process contract.
+`config/schema.json`; Runtime writes one schema-validated private JSON file and supplies only the
+standard runtime context above. Database URL, credential key/id and production mode are read from
+that file. No `SUNSHINE_*` environment aliases are accepted.
 
 The PostgreSQL administrator must create schema `sunshine` owned by the module
 role. Startup applies only migrations from `migrations/`; it deliberately does
 not create roles, databases or schemas.
 
-## Legacy data cutover
+## Fresh 0.6 state
 
-See [docs/sqlite-cutover.md](docs/sqlite-cutover.md). The importer decrypts the
-legacy row with the supplied Union key, immediately re-encrypts it with the
-Sunshine key, and stores no plaintext migration copy. Exact before/after module
-ciphertext is retained as a rollback journal.
+Sunshine 0.6 accepts only its current Manifest v2 configuration, PostgreSQL schema and
+`sunshine:v1` module ciphertext. The worker contains no Union SQLite importer, old ciphertext
+decoder, verification batch or rollback command. Deploy it with a fresh module database and enter
+hosts again through Union.
 
 ## Development
 

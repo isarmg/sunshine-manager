@@ -11,7 +11,6 @@ pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod http;
-pub mod migration;
 pub mod model;
 
 pub use auth::{InternalAuth, InternalIdentity};

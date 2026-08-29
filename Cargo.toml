@@ -1,6 +1,6 @@
 [package]
 name = "unionc-sunshine-worker"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.98"
 authors = ["sarmg <isarmg@163.com>"]
@@ -29,7 +29,6 @@ sqlx = { version = "0.8", default-features = false, features = [
   "migrate",
   "postgres",
   "runtime-tokio",
-  "sqlite",
   "tls-rustls-ring",
   "uuid",
 ] }
@@ -39,7 +38,9 @@ tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v4"] }
-sarmg-platform-gateway = { git = "https://github.com/isarmg/sarmg-platform.git", rev = "c788db2c349f159ad91df93f494c8ef72747a0d0" }
+sarmg-platform-core = { git = "https://github.com/isarmg/sarmg-platform.git", rev = "e7332a13d8ad5a08c7d7115a58a0fa47582c0bef" }
+sarmg-platform-gateway = { git = "https://github.com/isarmg/sarmg-platform.git", rev = "e7332a13d8ad5a08c7d7115a58a0fa47582c0bef" }
+sarmg-platform-sdk = { git = "https://github.com/isarmg/sarmg-platform.git", rev = "e7332a13d8ad5a08c7d7115a58a0fa47582c0bef" }
 
 [dev-dependencies]
 http-body-util = "0.1"

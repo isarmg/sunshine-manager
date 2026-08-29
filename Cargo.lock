@@ -1172,7 +1172,6 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
- "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -1818,12 +1817,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "sarmg-platform-core"
+version = "0.3.0"
+source = "git+https://github.com/isarmg/sarmg-platform.git?rev=e7332a13d8ad5a08c7d7115a58a0fa47582c0bef#e7332a13d8ad5a08c7d7115a58a0fa47582c0bef"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "sarmg-platform-events"
+version = "0.3.0"
+source = "git+https://github.com/isarmg/sarmg-platform.git?rev=e7332a13d8ad5a08c7d7115a58a0fa47582c0bef#e7332a13d8ad5a08c7d7115a58a0fa47582c0bef"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "sarmg-platform-gateway"
-version = "0.2.0"
-source = "git+https://github.com/isarmg/sarmg-platform.git?rev=c788db2c349f159ad91df93f494c8ef72747a0d0#c788db2c349f159ad91df93f494c8ef72747a0d0"
+version = "0.3.0"
+source = "git+https://github.com/isarmg/sarmg-platform.git?rev=e7332a13d8ad5a08c7d7115a58a0fa47582c0bef#e7332a13d8ad5a08c7d7115a58a0fa47582c0bef"
 dependencies = [
  "http",
  "subtle",
+ "thiserror",
+]
+
+[[package]]
+name = "sarmg-platform-sdk"
+version = "0.3.0"
+source = "git+https://github.com/isarmg/sarmg-platform.git?rev=e7332a13d8ad5a08c7d7115a58a0fa47582c0bef#e7332a13d8ad5a08c7d7115a58a0fa47582c0bef"
+dependencies = [
+ "sarmg-platform-core",
+ "sarmg-platform-events",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -2588,7 +2621,7 @@ checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
 
 [[package]]
 name = "unionc-sunshine-worker"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2599,7 +2632,9 @@ dependencies = [
  "hmac",
  "http-body-util",
  "reqwest",
+ "sarmg-platform-core",
  "sarmg-platform-gateway",
+ "sarmg-platform-sdk",
  "serde",
  "serde_json",
  "sha2",

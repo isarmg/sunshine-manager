@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sarmg.org/modules/sunshine/config-v1.schema.json",
+  "$id": "https://sarmg.org/modules/sunshine/config-v2.schema.json",
   "title": "Sunshine module configuration",
   "type": "object",
   "additionalProperties": false,

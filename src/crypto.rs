@@ -11,7 +11,6 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crate::error::{AppError, AppResult};
 
 const PREFIX: &str = "sunshine:v1:";
-const LEGACY_PREFIX: &str = "enc:v2:";
 
 #[derive(Clone)]
 pub struct SecretBox {
@@ -69,33 +68,6 @@ impl SecretBox {
     }
 }
 
-/// Decrypt a legacy UnionC `external_hosts.secret` without importing UnionC's
-/// process-global keyring or AppState into the worker.
-pub fn decrypt_legacy_union(
-    value: &str,
-    current_id: &str,
-    current: &[u8; 32],
-    previous: &BTreeMap<String, [u8; 32]>,
-) -> AppResult<String> {
-    let rest = value.strip_prefix(LEGACY_PREFIX).ok_or(AppError::Crypto)?;
-    let (id, payload) = rest.split_once(':').ok_or(AppError::Crypto)?;
-    let key = if id == current_id {
-        current
-    } else {
-        previous.get(id).ok_or(AppError::Crypto)?
-    };
-    let plaintext = open(key, &decode_payload(payload)?)?;
-    String::from_utf8(plaintext).map_err(|_| AppError::Crypto)
-}
-
-#[cfg(test)]
-pub(crate) fn encrypt_legacy_for_test(id: &str, key: &[u8; 32], value: &str) -> String {
-    format!(
-        "{LEGACY_PREFIX}{id}:{}",
-        STANDARD.encode(seal(key, value.as_bytes()).unwrap())
-    )
-}
-
 fn seal(key: &[u8; 32], plaintext: &[u8]) -> AppResult<Vec<u8>> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -147,15 +119,5 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(secrets.decrypt(&first).unwrap(), "password");
         assert!(!first.contains("password"));
-    }
-
-    #[test]
-    fn legacy_union_ciphertext_can_be_mapped_without_union_state() {
-        let key = [4; 32];
-        let encrypted = encrypt_legacy_for_test("old", &key, "legacy password");
-        assert_eq!(
-            decrypt_legacy_union(&encrypted, "old", &key, &BTreeMap::new()).unwrap(),
-            "legacy password"
-        );
     }
 }

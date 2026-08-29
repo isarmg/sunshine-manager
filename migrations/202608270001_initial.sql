@@ -33,17 +33,3 @@ CREATE TABLE audit_logs (
 );
 
 CREATE INDEX audit_logs_created_at_idx ON audit_logs(created_at_micros DESC);
-
--- Import batches are both the verification record and the exact rollback
--- journal. Values contain only module ciphertext, never plaintext credentials.
-CREATE TABLE import_batches (
-    batch_id            uuid PRIMARY KEY,
-    source_fingerprint  text NOT NULL CHECK (length(source_fingerprint) = 64),
-    source_row_count    integer NOT NULL CHECK (source_row_count >= 0),
-    before_state        jsonb NOT NULL,
-    imported_state      jsonb NOT NULL,
-    status              text NOT NULL CHECK (status IN ('applied', 'rolled_back')),
-    imported_at_micros  bigint NOT NULL,
-    verified_at_micros  bigint,
-    rolled_back_at_micros bigint
-);
