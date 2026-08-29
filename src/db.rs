@@ -51,7 +51,8 @@ pub async fn ready(pool: &SqlitePool) -> bool {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct StoredUser {
+#[allow(dead_code)]
+pub struct StoredUser {
     pub user_id: String,
     pub email: String,
     pub password_hash: String,
@@ -342,7 +343,6 @@ pub(crate) async fn insert_stored(
                created_at_micros,updated_at_micros)
            VALUES(?,?,?,?,?,?,?,?,?,?)"#,
     )
-    .bind(&row.host_id)
     .bind(&row.name)
     .bind(&row.address)
     .bind(row.web_port)
@@ -352,6 +352,7 @@ pub(crate) async fn insert_stored(
     .bind(row.position)
     .bind(row.created_at_micros)
     .bind(row.updated_at_micros)
+    .bind(&row.host_id)
     .execute(&mut **transaction)
     .await?;
     Ok(())

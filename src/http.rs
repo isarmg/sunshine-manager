@@ -54,10 +54,12 @@ impl WorkerState {
 }
 
 pub fn router(state: WorkerState) -> Router {
-    Router::new()
+    let public = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .route("/api/v1/auth/login", post(login))
+        .route("/api/v1/auth/login", post(login));
+
+    let protected = Router::new()
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/session", get(session))
         .route(
@@ -121,9 +123,13 @@ pub fn router(state: WorkerState) -> Router {
             post(cover_upload),
         )
         .layer(DefaultBodyLimit::max(1024 * 1024))
-        .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .layer(middleware::from_fn_with_state(state.clone(), authenticate));
+
+    Router::new()
+        .merge(public)
+        .merge(protected)
         .fallback_service(ServeDir::new(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/dist"),
+            std::env::var("SUNSHINE_MANAGER_STATIC_DIR").unwrap_or_else(|_| "web/dist".to_string()),
         ))
         .with_state(state)
 }
@@ -133,10 +139,6 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> AppResult<Response> {
-    let path = request.uri().path().to_string();
-    if path.starts_with("/health/") || path.starts_with("/api/v1/auth/") {
-        return Ok(next.run(request).await);
-    }
     let token = crate::auth::parse_cookie_token(request.headers()).ok_or(AppError::Unauthorized)?;
     let subject = state.auth.verify_session(&token)?;
     request
