@@ -123,7 +123,7 @@ pub fn router(state: WorkerState) -> Router {
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .fallback_service(ServeDir::new(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/dist"),
         ))
         .with_state(state)
 }

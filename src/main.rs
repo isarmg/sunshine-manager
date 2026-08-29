@@ -23,14 +23,48 @@ enum Command {
     Migrate(DatabaseArgs),
     /// Create the initial local administrator.
     AdminCreate(DatabaseArgs),
+    /// Reset an existing local administrator password.
+    AdminResetPassword(AdminResetPasswordArgs),
     /// Run a deployment health check against the configured instance.
     Doctor,
+    /// Create a PostgreSQL dump backup.
+    BackupCreate(BackupArgs),
+    /// Verify a PostgreSQL dump backup file.
+    BackupVerify(BackupArgs),
+    /// Restore a PostgreSQL dump backup.
+    Restore(RestoreArgs),
 }
 
 #[derive(clap::Args)]
 struct DatabaseArgs {
     #[arg(long, hide_env_values = true)]
     database_url: String,
+}
+
+#[derive(clap::Args)]
+struct AdminResetPasswordArgs {
+    #[arg(long, hide_env_values = true)]
+    database_url: String,
+    #[arg(long)]
+    email: String,
+    #[arg(long, hide_env_values = true)]
+    password: String,
+}
+
+#[derive(clap::Args)]
+struct BackupArgs {
+    #[arg(long, hide_env_values = true)]
+    database_url: String,
+    #[arg(long)]
+    output: std::path::PathBuf,
+}
+
+#[derive(clap::Args)]
+struct RestoreArgs {
+    #[arg(long, hide_env_values = true)]
+    database_url: String,
+    #[arg(long)]
+    input: std::path::PathBuf,
 }
 
 #[tokio::main]
@@ -59,6 +93,31 @@ async fn main() -> anyhow::Result<()> {
             println!("{{\"status\":\"admin-ready\",\"email\":{email:?}}}");
             Ok(())
         }
+        Command::AdminResetPassword(args) => {
+            let pool = db::connect(&args.database_url).await?;
+            db::reset_admin_password(&pool, &args.email, &args.password).await?;
+            println!("{{\"status\":\"password-reset\",\"email\":{:?}}}", args.email);
+            Ok(())
+        }
+        Command::BackupCreate(args) => {
+            create_pg_dump(&args.database_url, &args.output)?;
+            println!("{{\"status\":\"backup-created\",\"output\":{:?}}}", args.output);
+            Ok(())
+        }
+        Command::BackupVerify(args) => {
+            anyhow::ensure!(
+                args.output.is_file(),
+                "backup file does not exist: {}",
+                args.output.display()
+            );
+            println!("{{\"status\":\"backup-verified\",\"output\":{:?}}}", args.output);
+            Ok(())
+        }
+        Command::Restore(args) => {
+            restore_pg_dump(&args.database_url, &args.input)?;
+            println!("{{\"status\":\"restored\",\"input\":{:?}}}", args.input);
+            Ok(())
+        }
         Command::Doctor => {
             let config = ServeConfig::from_runtime()?;
             let pool = db::connect(&config.database_url).await?;
@@ -74,6 +133,31 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn create_pg_dump(database_url: &str, output: &std::path::Path) -> anyhow::Result<()> {
+    let status = std::process::Command::new("pg_dump")
+        .arg("--format=custom")
+        .arg("--file")
+        .arg(output)
+        .arg(database_url)
+        .status()?;
+    anyhow::ensure!(status.success(), "pg_dump failed");
+    Ok(())
+}
+
+fn restore_pg_dump(database_url: &str, input: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::ensure!(input.is_file(), "restore file does not exist");
+    let status = std::process::Command::new("pg_restore")
+        .arg("--clean")
+        .arg("--if-exists")
+        .arg("--no-owner")
+        .arg("--dbname")
+        .arg(database_url)
+        .arg(input)
+        .status()?;
+    anyhow::ensure!(status.success(), "pg_restore failed");
+    Ok(())
 }
 
 async fn serve() -> anyhow::Result<()> {

@@ -119,6 +119,29 @@ pub async fn ensure_admin_user(
     Ok(())
 }
 
+pub async fn reset_admin_password(
+    pool: &PgPool,
+    email: &str,
+    password: &str,
+) -> AppResult<()> {
+    let normalized = email.trim().to_lowercase();
+    let password_hash = crate::auth::hash_password(password)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    let result = sqlx::query(
+        "UPDATE sunshine.auth_users SET password_hash=$1 WHERE email=$2",
+    )
+    .bind(password_hash)
+    .bind(normalized)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::NotFound(format!(
+            "no active or existing user matched {email}"
+        )));
+    }
+    Ok(())
+}
+
 pub async fn list_hosts(pool: &PgPool, secrets: &SecretBox) -> AppResult<Vec<Host>> {
     let rows = sqlx::query_as::<_, StoredHost>(
         r#"SELECT host_id,name,address,web_port,username,secret,verify_tls,position,
