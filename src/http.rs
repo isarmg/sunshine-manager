@@ -763,10 +763,13 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use tower::ServiceExt;
 
-    fn test_router() -> Router {
+    async fn test_router() -> Router {
         let pool = SqlitePoolOptions::new()
-            .connect_lazy("sqlite::memory:")
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
             .unwrap();
+        db::migrate(&pool).await.unwrap();
         let state = WorkerState::new(
             pool,
             SecretBox::new("test", [2; 32]).unwrap(),
@@ -780,6 +783,7 @@ mod tests {
     #[tokio::test]
     async fn health_is_public() {
         let live = test_router()
+            .await
             .oneshot(Request::get("/health/live").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -789,6 +793,7 @@ mod tests {
     #[tokio::test]
     async fn private_route_requires_a_session_cookie() {
         let private = test_router()
+            .await
             .oneshot(
                 Request::get("/api/services/sunshine/hosts")
                     .body(Body::empty())
@@ -802,6 +807,7 @@ mod tests {
     #[tokio::test]
     async fn auth_route_is_public() {
         let response = test_router()
+            .await
             .oneshot(
                 Request::post("/api/v1/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")

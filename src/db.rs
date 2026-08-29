@@ -343,6 +343,7 @@ pub(crate) async fn insert_stored(
                created_at_micros,updated_at_micros)
            VALUES(?,?,?,?,?,?,?,?,?,?)"#,
     )
+    .bind(&row.host_id)
     .bind(&row.name)
     .bind(&row.address)
     .bind(row.web_port)
@@ -352,7 +353,6 @@ pub(crate) async fn insert_stored(
     .bind(row.position)
     .bind(row.created_at_micros)
     .bind(row.updated_at_micros)
-    .bind(&row.host_id)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -367,7 +367,6 @@ pub(crate) async fn update_stored(
              secret=?,verify_tls=?,position=?,created_at_micros=?,updated_at_micros=?
            WHERE host_id=?"#,
     )
-    .bind(&row.host_id)
     .bind(&row.name)
     .bind(&row.address)
     .bind(row.web_port)
@@ -377,6 +376,7 @@ pub(crate) async fn update_stored(
     .bind(row.position)
     .bind(row.created_at_micros)
     .bind(row.updated_at_micros)
+    .bind(&row.host_id)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -442,4 +442,98 @@ pub(crate) fn decode_host(row: StoredHost, secrets: &SecretBox) -> AppResult<Hos
 pub(crate) fn now_micros() -> anyhow::Result<i64> {
     let micros = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
     i64::try_from(micros).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn migrated_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn host_crud_matches_the_sqlite_schema() {
+        let pool = migrated_pool().await;
+        let secrets = SecretBox::new("test", [7; 32]).unwrap();
+
+        let created = insert_host(
+            &pool,
+            &secrets,
+            HostSaveRequest {
+                name: "Desktop".into(),
+                host: "192.0.2.10".into(),
+                web_port: 47_990,
+                username: "sunshine".into(),
+                password: Some("initial-secret".into()),
+                verify_tls: false,
+            },
+            false,
+            "test-user",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.name, "Desktop");
+        assert_eq!(created.host, "192.0.2.10");
+        assert_eq!(created.password, "initial-secret");
+        assert_eq!(
+            list_hosts(&pool, &secrets).await.unwrap(),
+            vec![created.clone()]
+        );
+
+        let updated = update_host(
+            &pool,
+            &secrets,
+            &created.id,
+            HostPatchRequest {
+                name: Some("Living Room".into()),
+                host: Some("192.0.2.20".into()),
+                web_port: Some(48_000),
+                username: Some("operator".into()),
+                password: Some("rotated-secret".into()),
+                verify_tls: Some(false),
+            },
+            false,
+            "test-user",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.name, "Living Room");
+        assert_eq!(updated.host, "192.0.2.20");
+        assert_eq!(updated.web_port, 48_000);
+        assert_eq!(updated.username, "operator");
+        assert_eq!(updated.password, "rotated-secret");
+        assert_eq!(
+            get_host(&pool, &secrets, &created.id).await.unwrap(),
+            updated
+        );
+
+        let stored_secret: String = sqlx::query_scalar("SELECT secret FROM hosts WHERE host_id=?")
+            .bind(&created.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(stored_secret, "rotated-secret");
+
+        let audit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(audit_count, 2);
+
+        delete_host(&pool, &created.id, "test-user").await.unwrap();
+        assert!(matches!(
+            get_host(&pool, &secrets, &created.id).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
 }
