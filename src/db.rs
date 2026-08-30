@@ -93,6 +93,121 @@ pub async fn ready(pool: &SqlitePool) -> bool {
     .unwrap_or(false)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct DoctorReport {
+    pub schema_ready: bool,
+    pub integrity_ready: bool,
+    pub foreign_keys_ready: bool,
+    pub writable: bool,
+    pub encrypted_values_ready: bool,
+}
+
+impl DoctorReport {
+    pub const fn healthy(self) -> bool {
+        self.schema_ready
+            && self.integrity_ready
+            && self.foreign_keys_ready
+            && self.writable
+            && self.encrypted_values_ready
+    }
+}
+
+/// Exercise the local durability and encryption boundary without retaining a
+/// probe row or contacting any configured Sunshine host.
+pub async fn doctor(pool: &SqlitePool, secrets: &SecretBox) -> DoctorReport {
+    let schema_ready = ready(pool).await;
+    let integrity_ready = sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+        .fetch_one(pool)
+        .await
+        .map(|value| value.eq_ignore_ascii_case("ok"))
+        .unwrap_or(false);
+    let foreign_keys_ready = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_optional(pool)
+        .await
+        .map(|row| row.is_none())
+        .unwrap_or(false);
+    let writable = schema_ready && doctor_write_probe(pool).await.is_ok();
+    let encrypted_values_ready = schema_ready
+        && validate_encrypted_values(pool, secrets)
+            .await
+            .unwrap_or(false);
+
+    DoctorReport {
+        schema_ready,
+        integrity_ready,
+        foreign_keys_ready,
+        writable,
+        encrypted_values_ready,
+    }
+}
+
+async fn doctor_write_probe(pool: &SqlitePool) -> anyhow::Result<()> {
+    let target = format!("doctor:rollback:{}", uuid::Uuid::new_v4());
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO audit_logs(action,target,detail,actor,created_at_micros) \
+         VALUES('doctor.write_probe',?,NULL,'doctor',?)",
+    )
+    .bind(&target)
+    .bind(now_micros()?)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.rollback().await?;
+
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE target = ?")
+        .bind(target)
+        .fetch_one(pool)
+        .await?;
+    anyhow::ensure!(retained == 0, "doctor write probe was not rolled back");
+    Ok(())
+}
+
+async fn validate_encrypted_values(pool: &SqlitePool, secrets: &SecretBox) -> anyhow::Result<bool> {
+    let mut host_cursor = String::new();
+    loop {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT host_id,secret FROM hosts \
+             WHERE secret IS NOT NULL AND host_id > ? ORDER BY host_id LIMIT 128",
+        )
+        .bind(&host_cursor)
+        .fetch_all(pool)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for (_, ciphertext) in &rows {
+            if secrets.decrypt(ciphertext).is_err() {
+                return Ok(false);
+            }
+        }
+        host_cursor = rows.last().expect("non-empty batch").0.clone();
+    }
+
+    let mut operation_cursor = String::new();
+    loop {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT operation_id,request_ciphertext FROM operations \
+             WHERE operation_id > ? ORDER BY operation_id LIMIT 128",
+        )
+        .bind(&operation_cursor)
+        .fetch_all(pool)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for (_, ciphertext) in &rows {
+            let Ok(plaintext) = secrets.decrypt(ciphertext) else {
+                return Ok(false);
+            };
+            if serde_json::from_str::<serde_json::Value>(&plaintext).is_err() {
+                return Ok(false);
+            }
+        }
+        operation_cursor = rows.last().expect("non-empty batch").0.clone();
+    }
+    Ok(true)
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 #[allow(dead_code)]
 pub struct StoredUser {
@@ -695,6 +810,47 @@ mod tests {
             .await
             .unwrap();
         assert!(!ready(&pool).await);
+    }
+
+    #[tokio::test]
+    async fn doctor_checks_writes_and_encryption_without_retaining_probe_rows() {
+        let pool = migrated_pool().await;
+        let secrets = SecretBox::new("doctor", [17; 32]).unwrap();
+        insert_host(
+            &pool,
+            &secrets,
+            HostSaveRequest {
+                name: "Doctor Host".into(),
+                host: "192.0.2.90".into(),
+                web_port: 47_990,
+                username: "sunshine".into(),
+                password: Some("doctor-secret".into()),
+                verify_tls: false,
+            },
+            false,
+            "test-user",
+        )
+        .await
+        .unwrap();
+        let audit_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        let report = doctor(&pool, &secrets).await;
+        assert!(report.healthy(), "{report:?}");
+        let audit_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(audit_after, audit_before);
+
+        let wrong_key = SecretBox::new("doctor", [18; 32]).unwrap();
+        let report = doctor(&pool, &wrong_key).await;
+        assert!(!report.healthy());
+        assert!(!report.encrypted_values_ready);
+        assert!(report.schema_ready && report.integrity_ready && report.foreign_keys_ready);
+        assert!(report.writable);
     }
 
     #[tokio::test]

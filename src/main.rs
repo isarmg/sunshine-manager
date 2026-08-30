@@ -131,14 +131,21 @@ async fn main() -> anyhow::Result<()> {
             let config = ServeConfig::from_runtime()?;
             let _maintenance = MaintenanceLock::shared(&config.database_url)?;
             let pool = db::connect(&config.database_url).await?;
-            let database_ready = db::ready(&pool).await;
+            let report = db::doctor(&pool, &config.secrets).await;
             println!(
-                "{{\"status\":\"{}\",\"bind\":\"{}\",\"database_ready\":{database_ready}}}",
-                if database_ready { "ok" } else { "degraded" },
-                config.bind
+                "{{\"status\":\"{}\",\"bind\":\"{}\",\"schema_ready\":{},\
+                 \"integrity_ready\":{},\"foreign_keys_ready\":{},\"writable\":{},\
+                 \"encrypted_values_ready\":{}}}",
+                if report.healthy() { "ok" } else { "degraded" },
+                config.bind,
+                report.schema_ready,
+                report.integrity_ready,
+                report.foreign_keys_ready,
+                report.writable,
+                report.encrypted_values_ready,
             );
-            if !database_ready {
-                anyhow::bail!("database is not ready");
+            if !report.healthy() {
+                anyhow::bail!("Sunshine Manager doctor found an unhealthy local boundary");
             }
             Ok(())
         }

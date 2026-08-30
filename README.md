@@ -85,6 +85,11 @@ and verifies integrity, foreign keys and the product schema before reporting suc
 command first validates and reconstructs the backup beside the destination, then atomically
 replaces the database and verifies the restored file.
 
+`doctor` verifies the product schema, SQLite integrity and foreign keys, proves that the database
+accepts a transaction which is then rolled back, and decrypts all stored host credentials and
+durable operation requests with the configured credential key. It never contacts a Sunshine host
+and does not retain its write probe.
+
 Cover uploads accept HTTPS URLs only when their DNS host is listed exactly in
 `SUNSHINE_MANAGER_COVER_URL_ALLOWLIST` and every address currently returned by DNS is public.
 The policy is checked before creating a new operation and checked again immediately before
