@@ -55,8 +55,8 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
         Command::AdminCreate(args) => {
-            let _maintenance = MaintenanceLock::exclusive(&args.database_url)?;
-            let pool = db::open_or_initialize(&args.database_url).await?;
+            let maintenance = MaintenanceLock::exclusive(&args.database_url)?;
+            let pool = db::open_or_initialize(&maintenance.database_url()).await?;
             let email = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL")
                 .unwrap_or_else(|_| "admin@example.com".to_string());
             let password = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD").ok();
@@ -65,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::AdminResetPassword(args) => {
-            let _maintenance = MaintenanceLock::exclusive(&args.database_url)?;
-            let pool = db::open_existing(&args.database_url).await?;
+            let maintenance = MaintenanceLock::exclusive(&args.database_url)?;
+            let pool = db::open_existing(&maintenance.database_url()).await?;
             db::reset_admin_password(&pool, &args.email, &args.password).await?;
             println!(
                 "{{\"status\":\"password-reset\",\"email\":{:?}}}",
@@ -76,8 +76,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Doctor => {
             let config = ServeConfig::from_runtime()?;
-            let _maintenance = MaintenanceLock::shared(&config.database_url)?;
-            let pool = db::open_existing(&config.database_url).await?;
+            let maintenance = MaintenanceLock::shared(&config.database_url)?;
+            let pool = db::open_existing(&maintenance.database_url()).await?;
             let report = db::doctor(&pool, &config.secrets).await;
             println!(
                 "{{\"status\":\"{}\",\"bind\":\"{}\",\"schema_ready\":{},\
@@ -104,8 +104,8 @@ async fn serve() -> anyhow::Result<()> {
     // Hold both locks for the complete process lifetime. The instance lock
     // rejects a second worker, while the shared maintenance lock excludes
     // external restore, upgrade, and administrator maintenance.
-    let _application_lock = ApplicationLock::acquire(&config.database_url)?;
-    let pool = db::open_or_initialize(&config.database_url).await?;
+    let application_lock = ApplicationLock::acquire(&config.database_url)?;
+    let pool = db::open_or_initialize(&application_lock.database_url()).await?;
     db::ensure_admin_user(
         &pool,
         &config.bootstrap_admin_email,

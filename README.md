@@ -76,6 +76,9 @@ worker fails closed instead of bypassing the process-local per-host execution mu
 shared maintenance lock lets the independent `isarmg-upgrade` tool take a consistent online
 backup. Restore, upgrade and administrator maintenance take the lock exclusively and therefore
 require the service to be stopped.
+On Linux, the database parent and lock files are opened with `openat2` beneath a retained directory
+descriptor. Symbolic-link traversal, special files and hard-linked database or lock aliases are
+rejected before SQLite opens the file.
 
 ## Current database contract
 

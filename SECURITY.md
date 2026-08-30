@@ -34,6 +34,9 @@ Run one service process per SQLite database. The process holds an exclusive inst
 full lifetime. The separate `isarmg-upgrade` tool shares the maintenance lock for online backup;
 restore, version upgrade and administrator maintenance require its exclusive mode. The product
 does not read old schemas or implement migration, backup or restore.
+Linux `openat2` resolution anchors SQLite and its locks to one verified directory descriptor and
+rejects symbolic-link traversal, non-regular files and hard-linked aliases. Other operating
+systems fail closed instead of using a weaker path lock.
 
 ## External systems
 
