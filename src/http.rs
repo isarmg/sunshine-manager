@@ -22,7 +22,8 @@ use crate::{
     error::{AppError, AppResult},
     model::{
         ClientUpdateRequest, CoverUploadRequest, HealthSnapshot, Host, HostInfo, HostPatchRequest,
-        HostSaveRequest, HostStatus, PinRequest, ProbeStatus, UnpairRequest, web_url,
+        HostSaveRequest, HostStatus, OperationResolutionRequest, PinRequest, ProbeStatus,
+        UnpairRequest, web_url,
     },
     operations::{
         HostMutationLocks, OperationManager, OperationView, RemoteOperationRequest,
@@ -105,6 +106,14 @@ pub fn router(state: WorkerState) -> Router {
         .route("/auth/logout", post(logout))
         .route("/auth/session", get(session))
         .route("/sunshine/operations/{operation_id}", get(operation_get))
+        .route(
+            "/sunshine/operations/{operation_id}/retry",
+            post(operation_retry),
+        )
+        .route(
+            "/sunshine/operations/{operation_id}/resolve",
+            post(operation_resolve),
+        )
         .route("/sunshine/hosts", get(list_hosts).post(create_host))
         .route(
             "/sunshine/hosts/{id}",
@@ -711,6 +720,33 @@ async fn operation_get(
         state
             .operations
             .get_for_actor(&identity.subject, &operation_id)
+            .await?,
+    ))
+}
+
+async fn operation_retry(
+    State(state): State<WorkerState>,
+    Extension(identity): Extension<InternalIdentity>,
+    Path(operation_id): Path<String>,
+) -> AppResult<Json<OperationView>> {
+    Ok(Json(
+        state
+            .operations
+            .retry_for_actor(&identity.subject, &operation_id)
+            .await?,
+    ))
+}
+
+async fn operation_resolve(
+    State(state): State<WorkerState>,
+    Extension(identity): Extension<InternalIdentity>,
+    Path(operation_id): Path<String>,
+    Json(body): Json<OperationResolutionRequest>,
+) -> AppResult<Json<OperationView>> {
+    Ok(Json(
+        state
+            .operations
+            .resolve_for_actor(&identity.subject, &operation_id, body.resolution.as_str())
             .await?,
     ))
 }

@@ -71,6 +71,8 @@ pub enum OperationState {
     Succeeded,
     Failed,
     Unknown,
+    DeadLetter,
+    Resolved,
 }
 
 impl OperationState {
@@ -81,6 +83,8 @@ impl OperationState {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::Unknown => "unknown",
+            Self::DeadLetter => "dead_letter",
+            Self::Resolved => "resolved",
         }
     }
 
@@ -91,6 +95,8 @@ impl OperationState {
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
             "unknown" => Ok(Self::Unknown),
+            "dead_letter" => Ok(Self::DeadLetter),
+            "resolved" => Ok(Self::Resolved),
             _ => Err(AppError::Internal(anyhow::anyhow!(
                 "invalid stored operation state"
             ))),
@@ -105,10 +111,12 @@ pub struct OperationView {
     pub operation_id: String,
     pub state: OperationState,
     pub attempt: i64,
+    pub max_attempts: i64,
     pub created_at_micros: i64,
     pub updated_at_micros: i64,
     pub started_at_micros: Option<i64>,
     pub completed_at_micros: Option<i64>,
+    pub resolution: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,10 +290,12 @@ impl OperationManager {
                 operation_id,
                 state: OperationState::Pending,
                 attempt: 0,
+                max_attempts: 3,
                 created_at_micros: now,
                 updated_at_micros: now,
                 started_at_micros: None,
                 completed_at_micros: None,
+                resolution: None,
             }
         } else {
             let existing =
@@ -306,8 +316,8 @@ impl OperationManager {
 
     pub async fn get_for_actor(&self, actor: &str, operation_id: &str) -> AppResult<OperationView> {
         let stored = sqlx::query_as::<_, StoredOperationView>(
-            r#"SELECT operation_id,state,attempt,created_at_micros,updated_at_micros,
-                      started_at_micros,completed_at_micros
+            r#"SELECT operation_id,state,attempt,max_attempts,created_at_micros,updated_at_micros,
+                      started_at_micros,completed_at_micros,resolution
                FROM operations WHERE operation_id=? AND actor=?"#,
         )
         .bind(operation_id)
@@ -316,6 +326,98 @@ impl OperationManager {
         .await?
         .ok_or_else(|| AppError::NotFound("operation not found".into()))?;
         stored.into_view()
+    }
+
+    /// Requeues only operations whose desired state can be compared safely
+    /// after an ambiguous delivery. The same durable operation and request are
+    /// retained; a new idempotency identity is never invented.
+    pub async fn retry_for_actor(
+        &self,
+        actor: &str,
+        operation_id: &str,
+    ) -> AppResult<OperationView> {
+        validate_actor(actor)?;
+        let now = db::now_micros()?;
+        let updated = sqlx::query_as::<_, StoredOperationView>(
+            r#"UPDATE operations
+               SET state='pending',updated_at_micros=?,started_at_micros=NULL,
+                   completed_at_micros=NULL,error_code=NULL,dead_letter_at_micros=NULL
+               WHERE operation_id=? AND actor=?
+                 AND state IN ('unknown','failed')
+                 AND attempt < max_attempts
+                 AND action IN (
+                    'sunshine.app.save','sunshine.client.unpair',
+                    'sunshine.client.unpair_all','sunshine.config.save'
+                 )
+               RETURNING operation_id,state,attempt,max_attempts,created_at_micros,
+                         updated_at_micros,started_at_micros,completed_at_micros,resolution"#,
+        )
+        .bind(now)
+        .bind(operation_id)
+        .bind(actor)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::Conflict("operation is not safely retryable".into()))?;
+        self.notify.notify_one();
+        updated.into_view()
+    }
+
+    /// Records an operator's evidence-based decision without replaying the
+    /// remote mutation. Unknown and exhausted operations remain immutable
+    /// evidence and only gain explicit resolution metadata.
+    pub async fn resolve_for_actor(
+        &self,
+        actor: &str,
+        operation_id: &str,
+        resolution: &str,
+    ) -> AppResult<OperationView> {
+        validate_actor(actor)?;
+        if !matches!(resolution, "confirmed_succeeded" | "confirmed_failed") {
+            return Err(AppError::BadRequest("invalid operation resolution".into()));
+        }
+        let now = db::now_micros()?;
+        let mut transaction = self.pool.begin().await?;
+        let operation = sqlx::query_as::<_, RecoveryOperation>(
+            "SELECT operation_id,actor,host_id,action,attempt FROM operations WHERE operation_id=? AND actor=? AND state IN ('unknown','dead_letter')",
+        )
+        .bind(operation_id)
+        .bind(actor)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| AppError::Conflict("operation does not require resolution".into()))?;
+        sqlx::query(
+            "UPDATE operations SET state='resolved',updated_at_micros=?,resolved_at_micros=?,resolved_by=?,resolution=? WHERE operation_id=?",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(actor)
+        .bind(resolution)
+        .bind(operation_id)
+        .execute(&mut *transaction)
+        .await?;
+        insert_outbox(
+            &mut transaction,
+            &format!("out_{}", Uuid::new_v4()),
+            operation_id,
+            "resolved",
+            &format!("{}.resolved", operation.action),
+            &operation.host_id,
+            actor,
+            &format!("operation_id={operation_id} state=resolved resolution={resolution}"),
+            now,
+        )
+        .await?;
+        let view = sqlx::query_as::<_, StoredOperationView>(
+            r#"SELECT operation_id,state,attempt,max_attempts,created_at_micros,
+                      updated_at_micros,started_at_micros,completed_at_micros,resolution
+               FROM operations WHERE operation_id=?"#,
+        )
+        .bind(operation_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        self.notify.notify_one();
+        view.into_view()
     }
 
     /// Converts interrupted in-flight work to `unknown` before new requests
@@ -513,8 +615,8 @@ impl OperationManager {
         Ok(sqlx::query_as::<_, ClaimedOperation>(
             r#"UPDATE operations
                SET state='running',attempt=attempt+1,started_at_micros=?,updated_at_micros=?
-               WHERE operation_id=? AND state='pending'
-               RETURNING operation_id,actor,host_id,action,request_ciphertext,attempt"#,
+               WHERE operation_id=? AND state='pending' AND attempt < max_attempts
+               RETURNING operation_id,actor,host_id,action,request_ciphertext,attempt,max_attempts"#,
         )
         .bind(now)
         .bind(now)
@@ -557,18 +659,24 @@ impl OperationManager {
         operation: &ClaimedOperation,
         outcome: ExecutionOutcome,
     ) -> AppResult<()> {
-        let (state, error_code) = outcome.parts();
+        let (mut state, error_code) = outcome.parts();
+        if state != OperationState::Succeeded && operation.attempt >= operation.max_attempts {
+            state = OperationState::DeadLetter;
+        }
         let now = db::now_micros()?;
         let mut transaction = self.pool.begin().await?;
         let updated = sqlx::query(
             r#"UPDATE operations
-               SET state=?,updated_at_micros=?,completed_at_micros=?,error_code=?
+               SET state=?,updated_at_micros=?,completed_at_micros=?,error_code=?,
+                   dead_letter_at_micros=CASE WHEN ?='dead_letter' THEN ? ELSE NULL END
                WHERE operation_id=? AND state='running'"#,
         )
         .bind(state.as_str())
         .bind(now)
         .bind(now)
         .bind(error_code)
+        .bind(state.as_str())
+        .bind(now)
         .bind(&operation.operation_id)
         .execute(&mut *transaction)
         .await?;
@@ -719,15 +827,17 @@ struct ExistingOperation {
     request_fingerprint: Vec<u8>,
     state: String,
     attempt: i64,
+    max_attempts: i64,
     created_at_micros: i64,
     updated_at_micros: i64,
     started_at_micros: Option<i64>,
     completed_at_micros: Option<i64>,
+    resolution: Option<String>,
 }
 
 const EXISTING_OPERATION_SQL: &str = r#"SELECT
-    operation_id,request_fingerprint,state,attempt,created_at_micros,
-    updated_at_micros,started_at_micros,completed_at_micros
+    operation_id,request_fingerprint,state,attempt,max_attempts,created_at_micros,
+    updated_at_micros,started_at_micros,completed_at_micros,resolution
 FROM operations
 WHERE actor=? AND host_id=? AND action=? AND idempotency_key_hash=?"#;
 
@@ -785,10 +895,12 @@ impl ExistingOperation {
             operation_id: self.operation_id,
             state: self.state,
             attempt: self.attempt,
+            max_attempts: self.max_attempts,
             created_at_micros: self.created_at_micros,
             updated_at_micros: self.updated_at_micros,
             started_at_micros: self.started_at_micros,
             completed_at_micros: self.completed_at_micros,
+            resolution: self.resolution,
         }
         .into_view()
     }
@@ -799,10 +911,12 @@ struct StoredOperationView {
     operation_id: String,
     state: String,
     attempt: i64,
+    max_attempts: i64,
     created_at_micros: i64,
     updated_at_micros: i64,
     started_at_micros: Option<i64>,
     completed_at_micros: Option<i64>,
+    resolution: Option<String>,
 }
 
 impl StoredOperationView {
@@ -811,10 +925,12 @@ impl StoredOperationView {
             operation_id: self.operation_id,
             state: OperationState::parse(&self.state)?,
             attempt: self.attempt,
+            max_attempts: self.max_attempts,
             created_at_micros: self.created_at_micros,
             updated_at_micros: self.updated_at_micros,
             started_at_micros: self.started_at_micros,
             completed_at_micros: self.completed_at_micros,
+            resolution: self.resolution,
         })
     }
 }
@@ -833,6 +949,7 @@ struct ClaimedOperation {
     action: String,
     request_ciphertext: String,
     attempt: i64,
+    max_attempts: i64,
 }
 
 #[derive(FromRow)]

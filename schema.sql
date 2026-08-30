@@ -96,9 +96,13 @@ CREATE TABLE operations (
                                       'running',
                                       'succeeded',
                                       'failed',
-                                      'unknown'
+                                      'unknown',
+                                      'dead_letter',
+                                      'resolved'
                                   )),
     attempt                  INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+    max_attempts             INTEGER NOT NULL DEFAULT 3
+                                  CHECK (max_attempts BETWEEN 1 AND 16),
     created_at_micros        INTEGER NOT NULL,
     updated_at_micros        INTEGER NOT NULL,
     started_at_micros        INTEGER,
@@ -110,11 +114,26 @@ CREATE TABLE operations (
                                       AND error_code NOT GLOB '*[^a-z0-9_]*'
                                   )
                               ),
+    dead_letter_at_micros    INTEGER,
+    resolved_at_micros       INTEGER,
+    resolved_by              TEXT CHECK (
+                                  resolved_by IS NULL OR
+                                  length(resolved_by) BETWEEN 1 AND 128
+                              ),
+    resolution               TEXT CHECK (
+                                  resolution IS NULL OR
+                                  resolution IN ('confirmed_succeeded', 'confirmed_failed')
+                              ),
     CHECK (
-        (state = 'pending' AND attempt = 0 AND started_at_micros IS NULL
-                           AND completed_at_micros IS NULL AND error_code IS NULL)
+        (state = 'pending' AND attempt < max_attempts
+                           AND started_at_micros IS NULL
+                           AND completed_at_micros IS NULL AND error_code IS NULL
+                           AND dead_letter_at_micros IS NULL
+                           AND resolved_at_micros IS NULL AND resolved_by IS NULL
+                           AND resolution IS NULL)
         OR
-        (state = 'running' AND attempt > 0 AND started_at_micros IS NOT NULL
+        (state = 'running' AND attempt > 0 AND attempt <= max_attempts
+                           AND started_at_micros IS NOT NULL
                            AND completed_at_micros IS NULL AND error_code IS NULL)
         OR
         (state = 'succeeded' AND attempt > 0 AND started_at_micros IS NOT NULL
@@ -124,6 +143,18 @@ CREATE TABLE operations (
              AND started_at_micros IS NOT NULL
              AND completed_at_micros IS NOT NULL
              AND error_code IS NOT NULL)
+        OR
+        (state = 'dead_letter' AND attempt >= max_attempts
+             AND started_at_micros IS NOT NULL
+             AND completed_at_micros IS NOT NULL
+             AND error_code IS NOT NULL
+             AND dead_letter_at_micros IS NOT NULL)
+        OR
+        (state = 'resolved' AND attempt > 0
+             AND completed_at_micros IS NOT NULL
+             AND resolved_at_micros IS NOT NULL
+             AND resolved_by IS NOT NULL
+             AND resolution IS NOT NULL)
     )
 );
 
@@ -142,7 +173,7 @@ CREATE TABLE audit_outbox (
     operation_id             TEXT NOT NULL REFERENCES operations(operation_id)
                                   ON DELETE CASCADE,
     event_kind               TEXT NOT NULL
-                                  CHECK (event_kind IN ('requested', 'completed')),
+                                  CHECK (event_kind IN ('requested', 'completed', 'resolved')),
     action                   TEXT NOT NULL
                                   CHECK (length(action) BETWEEN 1 AND 128),
     target                   TEXT NOT NULL
@@ -156,9 +187,6 @@ CREATE TABLE audit_outbox (
     delivery_attempt         INTEGER NOT NULL DEFAULT 0
                                   CHECK (delivery_attempt >= 0)
 );
-
-CREATE UNIQUE INDEX audit_outbox_operation_event_idx
-    ON audit_outbox(operation_id, event_kind);
 
 CREATE INDEX audit_outbox_pending_idx
     ON audit_outbox(delivered_at_micros, created_at_micros, outbox_id);

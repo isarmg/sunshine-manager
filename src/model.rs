@@ -116,6 +116,28 @@ pub struct CoverUploadRequest {
     pub url: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationResolutionRequest {
+    pub resolution: OperationResolution,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationResolution {
+    ConfirmedSucceeded,
+    ConfirmedFailed,
+}
+
+impl OperationResolution {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfirmedSucceeded => "confirmed_succeeded",
+            Self::ConfirmedFailed => "confirmed_failed",
+        }
+    }
+}
+
 pub fn validate_host_request(request: &HostSaveRequest, production: bool) -> AppResult<()> {
     validate_text("host name", &request.name, 128)?;
     validate_text("username", &request.username, 256)?;

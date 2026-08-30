@@ -18,7 +18,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 pub const APPLICATION: &str = "sunshine-manager";
 pub const APPLICATION_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SCHEMA_REVISION: i64 = 1;
-pub const SCHEMA_SHA256: &str = "1e55653f9b9b4805873164e52b79d399aec4fe327a8648218d4cbcb16b561b98";
+pub const SCHEMA_SHA256: &str = "8618a2ac77bb67378bdcca3af390c711e64e742c5d81d04072c98845bdc9f4df";
 
 const CURRENT_SCHEMA_SQL: &str = include_str!("../schema.sql");
 const PRODUCT_METADATA_DDL: &str = "CREATE TABLE product_metadata (\n\
