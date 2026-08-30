@@ -70,9 +70,12 @@ in parallel. Operation creation and its requested audit event commit together, a
 state changes and completion events. A durable idempotent audit outbox is redelivered after
 restart.
 
-Run exactly one active Sunshine Manager process for each SQLite database. Operation claiming
-is persistent, but the per-host execution mutex is process-local; deployments and upgrades
-must stop the old process before starting its replacement.
+Run exactly one active Sunshine Manager process for each SQLite database. The process now holds
+an exclusive, non-blocking instance lock beside that database for its full lifetime, so a second
+worker fails closed instead of bypassing the process-local per-host execution mutex. A separate
+shared maintenance lock lets `backup-create` use SQLite Online Backup while the service runs;
+`restore`, migration and administrator maintenance take it exclusively and therefore require the
+service to be stopped.
 
 ## Backup and restore
 

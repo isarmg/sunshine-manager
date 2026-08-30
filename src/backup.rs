@@ -8,6 +8,8 @@ use anyhow::{Context, ensure};
 use rusqlite::{Connection, OpenFlags, backup::Backup};
 use uuid::Uuid;
 
+use crate::runtime_lock::MaintenanceLock;
+
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -21,6 +23,9 @@ const REQUIRED_TABLES: [&str; 6] = [
 ];
 
 pub fn create(database_url: &str, output: &Path) -> anyhow::Result<()> {
+    // Online backup may run beside the service, but an exclusive restore or
+    // schema maintenance command must not begin while the snapshot is open.
+    let _maintenance = MaintenanceLock::shared(database_url)?;
     let source = database_path(database_url)?;
     ensure!(source.is_file(), "SQLite database file does not exist");
     ensure_distinct_files(&source, output)?;
@@ -117,6 +122,9 @@ pub fn verify(path: &Path) -> anyhow::Result<()> {
 }
 
 pub fn restore(database_url: &str, input: &Path) -> anyhow::Result<()> {
+    // This is the authoritative stop-the-world check. SQLite locking alone is
+    // insufficient because a live process could keep using the replaced inode.
+    let _maintenance = MaintenanceLock::exclusive(database_url)?;
     verify(input)?;
     let destination = database_path(database_url)?;
     ensure_distinct_files(input, &destination)?;
@@ -143,7 +151,7 @@ pub fn restore(database_url: &str, input: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn database_path(database_url: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn database_path(database_url: &str) -> anyhow::Result<PathBuf> {
     let value = database_url
         .strip_prefix("sqlite://")
         .or_else(|| database_url.strip_prefix("sqlite:"))
@@ -368,6 +376,7 @@ mod tests {
         create_product_database(&database);
         let database_url = format!("sqlite://{}", database.display());
 
+        let application = crate::runtime_lock::ApplicationLock::acquire(&database_url).unwrap();
         create(&database_url, &backup).unwrap();
         verify(&backup).unwrap();
         assert!(create(&database_url, &backup).is_err());
@@ -377,6 +386,11 @@ mod tests {
             .execute("INSERT INTO parents(id) VALUES(2)", [])
             .unwrap();
         drop(connection);
+        assert!(
+            restore(&database_url, &backup).is_err(),
+            "restore must fail closed while the service lock is held"
+        );
+        drop(application);
         restore(&database_url, &backup).unwrap();
 
         let restored = Connection::open(&database).unwrap();

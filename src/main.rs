@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use sunshine_manager::{
     ServeConfig, backup, db,
     http::{WorkerState, probe_loop, router},
+    runtime_lock::{ApplicationLock, MaintenanceLock},
 };
 
 #[derive(Parser)]
@@ -78,12 +79,14 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
         Command::Migrate(args) => {
+            let _maintenance = MaintenanceLock::exclusive(&args.database_url)?;
             let pool = db::connect(&args.database_url).await?;
             db::migrate(&pool).await?;
             println!("{{\"status\":\"migrated\",\"schema\":\"sunshine\"}}");
             Ok(())
         }
         Command::AdminCreate(args) => {
+            let _maintenance = MaintenanceLock::exclusive(&args.database_url)?;
             let pool = db::connect(&args.database_url).await?;
             db::migrate(&pool).await?;
             let email = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL")
@@ -94,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::AdminResetPassword(args) => {
+            let _maintenance = MaintenanceLock::exclusive(&args.database_url)?;
             let pool = db::connect(&args.database_url).await?;
             db::reset_admin_password(&pool, &args.email, &args.password).await?;
             println!(
@@ -125,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Doctor => {
             let config = ServeConfig::from_runtime()?;
+            let _maintenance = MaintenanceLock::shared(&config.database_url)?;
             let pool = db::connect(&config.database_url).await?;
             let database_ready = db::ready(&pool).await;
             println!(
@@ -142,6 +147,10 @@ async fn main() -> anyhow::Result<()> {
 
 async fn serve() -> anyhow::Result<()> {
     let config = ServeConfig::from_runtime()?;
+    // Hold both locks for the complete process lifetime. The instance lock
+    // rejects a second worker, while the shared maintenance lock still permits
+    // an online backup and excludes restore/migration/password maintenance.
+    let _application_lock = ApplicationLock::acquire(&config.database_url)?;
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;
     db::ensure_admin_user(

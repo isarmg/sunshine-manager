@@ -1,6 +1,6 @@
 //! Sunshine Manager is an independent service for managing Sunshine hosts.
 //!
-//! It owns its PostgreSQL schema, local administrator sessions and upstream
+//! It owns its SQLite schema, local administrator sessions and upstream
 //! Sunshine credentials.
 
 pub mod application;
@@ -19,6 +19,7 @@ pub mod infrastructure;
 pub mod login_admission;
 pub mod model;
 pub mod operations;
+pub mod runtime_lock;
 
 pub use auth::{InternalAuth, InternalIdentity};
 pub use config::ServeConfig;
