@@ -5,6 +5,8 @@ export type SessionInfo = {
   csrf_token: string;
 };
 
+export const CURRENT_API_PREFIX = "/api/v2";
+
 let csrfToken: string | undefined;
 
 export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -26,7 +28,7 @@ export async function requestJson<T>(url: string, init?: RequestInit): Promise<T
 }
 
 export async function login(email: string, password: string): Promise<SessionInfo> {
-  const session = await requestJson<SessionInfo>("/api/v1/auth/login", {
+  const session = await requestJson<SessionInfo>(`${CURRENT_API_PREFIX}/auth/login`, {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
@@ -35,14 +37,14 @@ export async function login(email: string, password: string): Promise<SessionInf
 }
 
 export async function restoreSession(): Promise<SessionInfo> {
-  const session = await requestJson<SessionInfo>("/api/v1/auth/session");
+  const session = await requestJson<SessionInfo>(`${CURRENT_API_PREFIX}/auth/session`);
   csrfToken = session.csrf_token;
   return session;
 }
 
 export async function logout() {
   try {
-    await requestJson("/api/v1/auth/logout", { method: "POST" });
+    await requestJson(`${CURRENT_API_PREFIX}/auth/logout`, { method: "POST" });
   } finally {
     csrfToken = undefined;
   }

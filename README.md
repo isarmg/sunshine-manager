@@ -38,9 +38,10 @@ assets, service-owned assets and group/world-writable content; install releases 
 read-only trees. The systemd unit points this setting at the versioned release's `current/web`
 directory and never relies on a process working directory.
 
-The local API uses `POST /api/v1/auth/login`, `POST /api/v1/auth/logout` and
-`GET /api/v1/auth/session`. Business endpoints remain under
-`/api/services/sunshine/*`. Browser sessions use random tokens whose SHA-256 digests are
+The 0.7 API accepts only `POST /api/v2/auth/login`, `POST /api/v2/auth/logout` and
+`GET /api/v2/auth/session`. Sunshine endpoints are available only under
+`/api/v2/sunshine/*`; older and unversioned paths are not aliases. Browser sessions use
+random tokens whose SHA-256 digests are
 stored in the product's SQLite database. Mutating requests require the session-bound
 `X-CSRF-Token` returned by login or the session endpoint and a matching `Origin`/`Host`.
 Login requests have bounded bodies, per-source and per-account budgets, a bounded global
@@ -65,7 +66,7 @@ Accepted mutations return `202 Accepted` with a non-secret status document:
 ```
 
 Authenticated callers can query their operation at
-`GET /api/services/sunshine/operations/{operation_id}`. States are `pending`, `running`,
+`GET /api/v2/sunshine/operations/{operation_id}`. States are `pending`, `running`,
 `succeeded`, `failed` and `unknown`. An `unknown` result means the remote side effect may
 have happened and must not be retried blindly. Requests are stored only as SecretBox
 ciphertext plus a SHA-256 fingerprint; the query never returns the actor, request, upstream

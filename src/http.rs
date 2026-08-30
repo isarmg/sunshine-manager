@@ -30,6 +30,9 @@ use crate::{
     },
 };
 
+const API_NAMESPACE: &str = "/api";
+const CURRENT_API_VERSION_PREFIX: &str = "/v2";
+
 #[derive(Clone)]
 pub struct WorkerState {
     pub pool: SqlitePool,
@@ -92,86 +95,57 @@ impl WorkerState {
 }
 
 pub fn router(state: WorkerState) -> Router {
-    let public = Router::new()
+    let health = Router::new()
         .route("/health/live", get(live))
-        .route("/health/ready", get(ready))
-        .route("/api/v1/auth/login", post(login))
+        .route("/health/ready", get(ready));
+
+    let public_api = Router::new()
+        .route("/auth/login", post(login))
         .layer(DefaultBodyLimit::max(16 * 1024));
 
-    let protected = Router::new()
-        .route("/api/v1/auth/logout", post(logout))
-        .route("/api/v1/auth/session", get(session))
+    let protected_api = Router::new()
+        .route("/auth/logout", post(logout))
+        .route("/auth/session", get(session))
+        .route("/sunshine/operations/{operation_id}", get(operation_get))
+        .route("/sunshine/hosts", get(list_hosts).post(create_host))
         .route(
-            "/api/services/sunshine/operations/{operation_id}",
-            get(operation_get),
-        )
-        .route(
-            "/api/services/sunshine/hosts",
-            get(list_hosts).post(create_host),
-        )
-        .route(
-            "/api/services/sunshine/hosts/{id}",
+            "/sunshine/hosts/{id}",
             patch(update_host).delete(delete_host),
         )
-        .route("/api/services/sunshine/hosts/{id}/status", get(status))
+        .route("/sunshine/hosts/{id}/status", get(status))
+        .route("/sunshine/hosts/{id}/apps", get(apps_list).post(apps_save))
+        .route("/sunshine/hosts/{id}/apps/close", post(apps_close))
+        .route("/sunshine/hosts/{id}/apps/{index}", delete(apps_delete))
+        .route("/sunshine/hosts/{id}/clients", get(clients_list))
+        .route("/sunshine/hosts/{id}/clients/unpair", post(clients_unpair))
         .route(
-            "/api/services/sunshine/hosts/{id}/apps",
-            get(apps_list).post(apps_save),
-        )
-        .route(
-            "/api/services/sunshine/hosts/{id}/apps/close",
-            post(apps_close),
-        )
-        .route(
-            "/api/services/sunshine/hosts/{id}/apps/{index}",
-            delete(apps_delete),
-        )
-        .route(
-            "/api/services/sunshine/hosts/{id}/clients",
-            get(clients_list),
-        )
-        .route(
-            "/api/services/sunshine/hosts/{id}/clients/unpair",
-            post(clients_unpair),
-        )
-        .route(
-            "/api/services/sunshine/hosts/{id}/clients/unpair-all",
+            "/sunshine/hosts/{id}/clients/unpair-all",
             post(clients_unpair_all),
         )
+        .route("/sunshine/hosts/{id}/clients/update", post(clients_update))
         .route(
-            "/api/services/sunshine/hosts/{id}/clients/update",
-            post(clients_update),
-        )
-        .route(
-            "/api/services/sunshine/hosts/{id}/config",
+            "/sunshine/hosts/{id}/config",
             get(config_get).post(config_save),
         )
-        .route(
-            "/api/services/sunshine/hosts/{id}/config/locale",
-            get(config_locale),
-        )
-        .route("/api/services/sunshine/hosts/{id}/api-logs", get(logs))
-        .route("/api/services/sunshine/hosts/{id}/pin", post(pin))
-        .route("/api/services/sunshine/hosts/{id}/restart", post(restart))
-        .route(
-            "/api/services/sunshine/hosts/{id}/reset-display",
-            post(reset_display),
-        )
-        .route(
-            "/api/services/sunshine/hosts/{id}/covers/{index}",
-            get(cover),
-        )
-        .route(
-            "/api/services/sunshine/hosts/{id}/covers/upload",
-            post(cover_upload),
-        )
+        .route("/sunshine/hosts/{id}/config/locale", get(config_locale))
+        .route("/sunshine/hosts/{id}/api-logs", get(logs))
+        .route("/sunshine/hosts/{id}/pin", post(pin))
+        .route("/sunshine/hosts/{id}/restart", post(restart))
+        .route("/sunshine/hosts/{id}/reset-display", post(reset_display))
+        .route("/sunshine/hosts/{id}/covers/{index}", get(cover))
+        .route("/sunshine/hosts/{id}/covers/upload", post(cover_upload))
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
 
+    let current_api = Router::new().merge(public_api).merge(protected_api);
+    let api_namespace = Router::new()
+        .nest(CURRENT_API_VERSION_PREFIX, current_api)
+        .fallback(|| async { StatusCode::NOT_FOUND });
+
     let static_dir = state.static_dir.clone();
     Router::new()
-        .merge(public)
-        .merge(protected)
+        .merge(health)
+        .nest(API_NAMESPACE, api_namespace)
         .fallback_service(ServeDir::new(static_dir))
         .with_state(state)
 }
@@ -953,7 +927,7 @@ mod tests {
         let private = test_router()
             .await
             .oneshot(
-                Request::get("/api/services/sunshine/hosts")
+                Request::get("/api/v2/sunshine/hosts")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -967,7 +941,7 @@ mod tests {
         let response = test_router()
             .await
             .oneshot(
-                Request::post("/api/v1/auth/login")
+                Request::post("/api/v2/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         r#"{"email":"admin@example.com","password":"bad-password"}"#,
@@ -980,6 +954,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn old_and_unversioned_api_paths_are_not_routes() {
+        for (method, path) in [
+            (Method::POST, "/api/v1/auth/login"),
+            (Method::GET, "/api/services/sunshine/hosts"),
+            (Method::GET, "/api/sunshine/hosts"),
+        ] {
+            let response = test_router()
+                .await
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            r#"{"email":"admin@example.com","password":"password"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn login_body_is_bounded_before_password_work() {
         let oversized = serde_json::json!({
             "email": "admin@example.com",
@@ -989,7 +988,7 @@ mod tests {
         let response = test_router()
             .await
             .oneshot(
-                Request::post("/api/v1/auth/login")
+                Request::post("/api/v2/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(oversized))
                     .unwrap(),
@@ -1035,7 +1034,7 @@ mod tests {
         let login = application
             .clone()
             .oneshot(
-                Request::post("/api/v1/auth/login")
+                Request::post("/api/v2/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         r#"{"email":"admin@example.com","password":"correct horse battery staple"}"#,
@@ -1073,7 +1072,7 @@ mod tests {
         let current = application
             .clone()
             .oneshot(
-                Request::get("/api/v1/auth/session")
+                Request::get("/api/v2/auth/session")
                     .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -1085,7 +1084,7 @@ mod tests {
         let missing_csrf = application
             .clone()
             .oneshot(
-                Request::post("/api/v1/auth/logout")
+                Request::post("/api/v2/auth/logout")
                     .header(header::COOKIE, &cookie)
                     .header(header::HOST, "localhost")
                     .header(header::ORIGIN, "http://localhost")
@@ -1099,7 +1098,7 @@ mod tests {
         let missing_origin = application
             .clone()
             .oneshot(
-                Request::post("/api/v1/auth/logout")
+                Request::post("/api/v2/auth/logout")
                     .header(header::COOKIE, &cookie)
                     .header("x-csrf-token", &csrf)
                     .body(Body::empty())
@@ -1112,7 +1111,7 @@ mod tests {
         let logout = application
             .clone()
             .oneshot(
-                Request::post("/api/v1/auth/logout")
+                Request::post("/api/v2/auth/logout")
                     .header(header::COOKIE, &cookie)
                     .header("x-csrf-token", &csrf)
                     .header(header::HOST, "localhost")
@@ -1126,7 +1125,7 @@ mod tests {
 
         let revoked = application
             .oneshot(
-                Request::get("/api/v1/auth/session")
+                Request::get("/api/v2/auth/session")
                     .header(header::COOKIE, cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -1207,7 +1206,7 @@ mod tests {
         let login = application
             .clone()
             .oneshot(
-                Request::post("/api/v1/auth/login")
+                Request::post("/api/v2/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         r#"{"email":"admin@example.com","password":"correct horse battery staple"}"#,
@@ -1227,7 +1226,7 @@ mod tests {
         let login_body: Value =
             serde_json::from_slice(&login.into_body().collect().await.unwrap().to_bytes()).unwrap();
         let csrf = login_body["csrf_token"].as_str().unwrap();
-        let restart_url = format!("/api/services/sunshine/hosts/{}/restart", host.id);
+        let restart_url = format!("/api/v2/sunshine/hosts/{}/restart", host.id);
 
         let missing_key = application
             .clone()
@@ -1288,7 +1287,7 @@ mod tests {
         let query = application
             .clone()
             .oneshot(
-                Request::get(format!("/api/services/sunshine/operations/{operation_id}"))
+                Request::get(format!("/api/v2/sunshine/operations/{operation_id}"))
                     .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -1303,7 +1302,7 @@ mod tests {
             assert!(query_body.get(forbidden).is_none());
         }
 
-        let config_url = format!("/api/services/sunshine/hosts/{}/config", host.id);
+        let config_url = format!("/api/v2/sunshine/hosts/{}/config", host.id);
         for (body, expected) in [
             (r#"{"private":"first-value"}"#, StatusCode::ACCEPTED),
             (r#"{"private":"second-value"}"#, StatusCode::CONFLICT),
@@ -1334,7 +1333,7 @@ mod tests {
         assert!(!config_ciphertext.contains("first-value"));
         assert!(!config_ciphertext.contains("second-value"));
 
-        let cover_url = format!("/api/services/sunshine/hosts/{}/covers/upload", host.id);
+        let cover_url = format!("/api/v2/sunshine/hosts/{}/covers/upload", host.id);
         for (signature, expected) in [
             ("stable-secret", StatusCode::ACCEPTED),
             ("different-secret", StatusCode::CONFLICT),
