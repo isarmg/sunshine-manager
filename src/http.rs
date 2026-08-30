@@ -23,6 +23,7 @@ use crate::{
         ClientUpdateRequest, CoverUploadRequest, HealthSnapshot, Host, HostInfo, HostPatchRequest,
         HostSaveRequest, HostStatus, PinRequest, ProbeStatus, UnpairRequest, web_url,
     },
+    operations::HostMutationLocks,
 };
 
 #[derive(Clone)]
@@ -33,6 +34,7 @@ pub struct WorkerState {
     pub production: bool,
     upstream: UpstreamClient,
     health: Arc<RwLock<HashMap<String, HealthSnapshot>>>,
+    mutation_locks: HostMutationLocks,
     login_admission: crate::login_admission::LoginAdmission,
     dummy_password_hash: Arc<String>,
 }
@@ -54,6 +56,7 @@ impl WorkerState {
             production,
             upstream: UpstreamClient::new()?,
             health: Arc::new(RwLock::new(HashMap::new())),
+            mutation_locks: HostMutationLocks::default(),
             login_admission: crate::login_admission::LoginAdmission::default(),
             dummy_password_hash: Arc::new(dummy_password_hash),
         })
@@ -344,17 +347,13 @@ async fn create_host(
     Extension(identity): Extension<InternalIdentity>,
     Json(request): Json<HostSaveRequest>,
 ) -> AppResult<(StatusCode, Json<HostInfo>)> {
-    let worker = state.clone();
-    let host = finish(async move {
-        db::insert_host(
-            &worker.pool,
-            &worker.secrets,
-            request,
-            worker.production,
-            &identity.subject,
-        )
-        .await
-    })
+    let host = db::insert_host(
+        &state.pool,
+        &state.secrets,
+        request,
+        state.production,
+        &identity.subject,
+    )
     .await?;
     state
         .health
@@ -370,18 +369,15 @@ async fn update_host(
     Path(id): Path<String>,
     Json(request): Json<HostPatchRequest>,
 ) -> AppResult<Json<HostInfo>> {
-    let worker = state.clone();
-    let host = finish(async move {
-        db::update_host(
-            &worker.pool,
-            &worker.secrets,
-            &id,
-            request,
-            worker.production,
-            &identity.subject,
-        )
-        .await
-    })
+    let _guard = state.mutation_locks.lock(&id).await;
+    let host = db::update_host(
+        &state.pool,
+        &state.secrets,
+        &id,
+        request,
+        state.production,
+        &identity.subject,
+    )
     .await?;
     state
         .health
@@ -396,9 +392,9 @@ async fn delete_host(
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
-    let worker = state.clone();
+    let _guard = state.mutation_locks.lock(&id).await;
     let deleted_id = id.clone();
-    finish(async move { db::delete_host(&worker.pool, &id, &identity.subject).await }).await?;
+    db::delete_host(&state.pool, &id, &identity.subject).await?;
     state.health.write().await.remove(&deleted_id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -718,26 +714,18 @@ where
     F: FnOnce(UpstreamClient, Host) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = AppResult<Value>> + Send + 'static,
 {
+    let _guard = state.mutation_locks.lock(&id).await;
     let host = load_host(&state, &id).await?;
-    let pool = state.pool.clone();
-    let actor = identity.subject;
-    let client = state.upstream.clone();
-    let target = id;
-    let value = finish(async move {
-        let value = operation(client, host).await?;
-        db::audit_best_effort(&pool, action, &target, &actor, detail.as_deref()).await;
-        Ok(value)
-    })
-    .await?;
+    let value = operation(state.upstream.clone(), host).await?;
+    db::audit_best_effort(
+        &state.pool,
+        action,
+        &id,
+        &identity.subject,
+        detail.as_deref(),
+    )
+    .await;
     Ok(Json(value))
-}
-
-async fn finish<T: Send + 'static>(
-    future: impl std::future::Future<Output = AppResult<T>> + Send + 'static,
-) -> AppResult<T> {
-    tokio::spawn(future)
-        .await
-        .map_err(|error| AppError::Internal(anyhow::anyhow!("detached mutation failed: {error}")))?
 }
 
 async fn load_host(state: &WorkerState, id: &str) -> AppResult<Host> {
