@@ -3,7 +3,7 @@ use std::{env, net::SocketAddr, time::Duration};
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use crate::{auth::InternalAuth, crypto::SecretBox};
+use crate::{auth::InternalAuth, cover_policy::CoverUrlPolicy, crypto::SecretBox};
 
 #[derive(Clone)]
 pub struct ServeConfig {
@@ -12,6 +12,7 @@ pub struct ServeConfig {
     pub production: bool,
     pub internal_auth: InternalAuth,
     pub secrets: SecretBox,
+    pub cover_url_policy: CoverUrlPolicy,
     pub bootstrap_admin_email: String,
     pub bootstrap_admin_password: Option<String>,
 }
@@ -55,6 +56,10 @@ impl ServeConfig {
                 value("SUNSHINE_MANAGER_CREDENTIAL_KEY_ID", "primary"),
                 credential_key,
             )?,
+            cover_url_policy: CoverUrlPolicy::from_csv(&value(
+                "SUNSHINE_MANAGER_COVER_URL_ALLOWLIST",
+                "",
+            ))?,
             bootstrap_admin_email: value(
                 "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL",
                 "admin@example.com",

@@ -16,6 +16,7 @@ use tower_http::services::ServeDir;
 use crate::{
     InternalAuth, InternalIdentity,
     client::UpstreamClient,
+    cover_policy::CoverUrlPolicy,
     crypto::SecretBox,
     db,
     error::{AppError, AppResult},
@@ -35,6 +36,7 @@ pub struct WorkerState {
     upstream: UpstreamClient,
     health: Arc<RwLock<HashMap<String, HealthSnapshot>>>,
     mutation_locks: HostMutationLocks,
+    cover_url_policy: CoverUrlPolicy,
     login_admission: crate::login_admission::LoginAdmission,
     dummy_password_hash: Arc<String>,
 }
@@ -57,9 +59,15 @@ impl WorkerState {
             upstream: UpstreamClient::new()?,
             health: Arc::new(RwLock::new(HashMap::new())),
             mutation_locks: HostMutationLocks::default(),
+            cover_url_policy: CoverUrlPolicy::default(),
             login_admission: crate::login_admission::LoginAdmission::default(),
             dummy_password_hash: Arc::new(dummy_password_hash),
         })
+    }
+
+    pub fn with_cover_url_policy(mut self, policy: CoverUrlPolicy) -> Self {
+        self.cover_url_policy = policy;
+        self
     }
 }
 
@@ -683,14 +691,7 @@ async fn cover_upload(
     Json(body): Json<CoverUploadRequest>,
 ) -> AppResult<Json<Value>> {
     let key = validate_opaque("cover key", &body.key, 512)?.to_string();
-    let url = reqwest::Url::parse(body.url.trim())
-        .map_err(|_| AppError::BadRequest("cover URL must be absolute".into()))?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(AppError::BadRequest(
-            "cover URL must use HTTP or HTTPS".into(),
-        ));
-    }
-    let url = url.to_string();
+    let url = state.cover_url_policy.validate(&body.url).await?;
     mutate(
         state,
         identity,

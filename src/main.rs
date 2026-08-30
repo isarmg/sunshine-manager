@@ -155,7 +155,8 @@ async fn serve() -> anyhow::Result<()> {
         config.secrets,
         config.internal_auth,
         config.production,
-    )?;
+    )?
+    .with_cover_url_policy(config.cover_url_policy);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     tracing::info!(bind = %config.bind, schema = db::SCHEMA, "Sunshine manager ready");
     let probe = tokio::spawn(probe_loop(state.clone()));

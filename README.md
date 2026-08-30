@@ -22,6 +22,7 @@ SUNSHINE_MANAGER_SESSION_IDLE_TTL_SECONDS=1800
 SUNSHINE_MANAGER_SESSION_COOKIE_SECURE=true
 SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD=<initial admin password>
+SUNSHINE_MANAGER_COVER_URL_ALLOWLIST=covers.example.com,cdn.example.com
 ```
 
 Then:
@@ -45,3 +46,8 @@ and verifies integrity, foreign keys and the product schema before reporting suc
 `backup-verify` performs the same read-only checks. Stop the service before `restore`; the
 command first validates and reconstructs the backup beside the destination, then atomically
 replaces the database and verifies the restored file.
+
+Cover uploads accept HTTPS URLs only when their DNS host is listed exactly in
+`SUNSHINE_MANAGER_COVER_URL_ALLOWLIST` and every address currently returned by DNS is public.
+The managed Sunshine machine resolves and fetches the URL itself, so its network must also enforce
+an outbound allowlist that blocks private, link-local and metadata networks and unsafe redirects.

@@ -9,6 +9,7 @@ pub mod backup;
 pub mod cli;
 pub mod client;
 pub mod config;
+pub mod cover_policy;
 pub mod crypto;
 pub mod db;
 pub mod domain;
