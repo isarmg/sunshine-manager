@@ -8,8 +8,8 @@ Type=simple
 User=isarmg-sunshine
 Group=isarmg-sunshine
 EnvironmentFile=/etc/isarmg/sunshine-manager.env
-Environment=SUNSHINE_MANAGER_STATIC_DIR=/opt/isarmg/sunshine-manager/current/web
-ExecStart=/opt/isarmg/sunshine-manager/current/bin/sunshine-manager serve
+Environment=SUNSHINE_MANAGER_STATIC_DIR=/opt/isarmg/sunshine-manager/releases/0.7.0/web
+ExecStart=/opt/isarmg/sunshine-manager/releases/0.7.0/bin/sunshine-manager serve-release --root /opt/isarmg/sunshine-manager/releases/0.7.0
 StateDirectory=isarmg/sunshine-manager/db
 StateDirectoryMode=0700
 RuntimeDirectory=isarmg/sunshine-manager

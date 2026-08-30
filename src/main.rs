@@ -1,8 +1,10 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use sunshine_manager::{
     ServeConfig, db,
     http::{WorkerState, probe_loop, router},
-    release_contract,
+    release_bundle, release_contract,
     runtime_lock::{ApplicationLock, MaintenanceLock},
 };
 
@@ -19,8 +21,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve the private loopback API (the default command).
+    /// Serve a development build (the default command; release binaries reject it).
     Serve,
+    /// Verify and serve the exact immutable release tree.
+    ServeRelease(VerifyReleaseArgs),
     /// Create the initial local administrator.
     AdminCreate(DatabaseArgs),
     /// Reset an existing local administrator password.
@@ -29,6 +33,8 @@ enum Command {
     Doctor,
     /// Print the exact machine-readable product, API, schema and target identity.
     Identity,
+    /// Verify an immutable release tree with the binary contained in that tree.
+    VerifyRelease(VerifyReleaseArgs),
 }
 
 #[derive(clap::Args)]
@@ -47,6 +53,12 @@ struct AdminResetPasswordArgs {
     password: String,
 }
 
+#[derive(clap::Args)]
+struct VerifyReleaseArgs {
+    #[arg(long)]
+    root: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -56,7 +68,17 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     match Cli::parse().command.unwrap_or(Command::Serve) {
-        Command::Serve => serve().await,
+        Command::Serve => {
+            anyhow::ensure!(
+                !release_contract::BinaryIdentity::current()?.is_release_bound(),
+                "source-bound release binaries must use serve-release"
+            );
+            serve(None).await
+        }
+        Command::ServeRelease(args) => {
+            release_bundle::verify_release(&args.root)?;
+            serve(Some(&args.root)).await
+        }
         Command::AdminCreate(args) => {
             let maintenance = MaintenanceLock::exclusive(&args.database_url)?;
             let pool = db::open_or_initialize(&maintenance.database_url()).await?;
@@ -103,11 +125,22 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", release_contract::current_json()?);
             Ok(())
         }
+        Command::VerifyRelease(args) => {
+            let report = release_bundle::verify_release(&args.root)?;
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
     }
 }
 
-async fn serve() -> anyhow::Result<()> {
+async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
     let config = ServeConfig::from_runtime()?;
+    if let Some(root) = release_root {
+        anyhow::ensure!(
+            config.static_dir == root.join("web"),
+            "SUNSHINE_MANAGER_STATIC_DIR must belong to the verified release"
+        );
+    }
     // Hold both locks for the complete process lifetime. The instance lock
     // rejects a second worker, while the shared maintenance lock excludes
     // external restore, upgrade, and administrator maintenance.

@@ -23,6 +23,9 @@ jobs:
           persist-credentials: false
       - name: Enforce workflow supply-chain policy
         run: python3 scripts/check-workflow-supply-chain.py
+      - name: Validate release tooling
+        run: |
+          python3 -m py_compile scripts/package-release.py scripts/write-release-manifest.py
       - name: Install exact Rust toolchain
         run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
       - name: Check formatting

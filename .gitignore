@@ -11,3 +11,5 @@ Thumbs.db
 web/node_modules/
 web/dist/
 *.tsbuildinfo
+__pycache__/
+*.py[cod]

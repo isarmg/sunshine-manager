@@ -15,6 +15,7 @@ pub mod http;
 pub mod login_admission;
 pub mod model;
 pub mod operations;
+pub mod release_bundle;
 pub mod release_contract;
 pub mod runtime_lock;
 
