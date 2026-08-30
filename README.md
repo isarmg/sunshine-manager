@@ -32,6 +32,10 @@ Then:
 sunshine-manager serve
 ```
 
+`sunshine-manager identity` prints the binary's strict machine-readable release contract.
+Installers and deployment checks must match every field, including the application version,
+API prefix, schema fingerprint and compilation target; no earlier identity is accepted.
+
 `SUNSHINE_MANAGER_STATIC_DIR` is mandatory and must resolve to the current release's complete
 asset directory containing `index.html`. Production rejects links, special files, hard-linked
 assets, service-owned assets and group/world-writable content; install releases as root-owned,

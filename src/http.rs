@@ -28,10 +28,8 @@ use crate::{
         HostMutationLocks, OperationManager, OperationView, RemoteOperationRequest,
         validate_idempotency_key,
     },
+    release_contract::{API_NAMESPACE, API_VERSION_PREFIX},
 };
-
-const API_NAMESPACE: &str = "/api";
-const CURRENT_API_VERSION_PREFIX: &str = "/v2";
 
 #[derive(Clone)]
 pub struct WorkerState {
@@ -139,7 +137,7 @@ pub fn router(state: WorkerState) -> Router {
 
     let current_api = Router::new().merge(public_api).merge(protected_api);
     let api_namespace = Router::new()
-        .nest(CURRENT_API_VERSION_PREFIX, current_api)
+        .nest(API_VERSION_PREFIX, current_api)
         .fallback(|| async { StatusCode::NOT_FOUND });
 
     let static_dir = state.static_dir.clone();

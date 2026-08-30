@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use sunshine_manager::{
     ServeConfig, db,
     http::{WorkerState, probe_loop, router},
+    release_contract,
     runtime_lock::{ApplicationLock, MaintenanceLock},
 };
 
@@ -26,6 +27,8 @@ enum Command {
     AdminResetPassword(AdminResetPasswordArgs),
     /// Run a deployment health check against the configured instance.
     Doctor,
+    /// Print the exact machine-readable product, API, schema and target identity.
+    Identity,
 }
 
 #[derive(clap::Args)]
@@ -94,6 +97,10 @@ async fn main() -> anyhow::Result<()> {
             if !report.healthy() {
                 anyhow::bail!("Sunshine Manager doctor found an unhealthy local boundary");
             }
+            Ok(())
+        }
+        Command::Identity => {
+            println!("{}", release_contract::current_json()?);
             Ok(())
         }
     }
