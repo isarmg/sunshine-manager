@@ -17,6 +17,7 @@ The server reads environment variables with the `SUNSHINE_MANAGER_` prefix:
 ```text
 SUNSHINE_MANAGER_DATABASE_URL=sqlite:///var/lib/isarmg/sunshine-manager/db/app.db
 SUNSHINE_MANAGER_CREDENTIAL_KEY=<base64 32 bytes>
+SUNSHINE_MANAGER_STATIC_DIR=/opt/isarmg/sunshine-manager/current/web
 SUNSHINE_MANAGER_SESSION_TTL_SECONDS=43200
 SUNSHINE_MANAGER_SESSION_IDLE_TTL_SECONDS=1800
 SUNSHINE_MANAGER_SESSION_COOKIE_SECURE=true
@@ -30,6 +31,12 @@ Then:
 ```bash
 sunshine-manager serve
 ```
+
+`SUNSHINE_MANAGER_STATIC_DIR` is mandatory and must resolve to the current release's complete
+asset directory containing `index.html`. Production rejects links, special files, hard-linked
+assets, service-owned assets and group/world-writable content; install releases as root-owned,
+read-only trees. The systemd unit points this setting at the versioned release's `current/web`
+directory and never relies on a process working directory.
 
 The local API uses `POST /api/v1/auth/login`, `POST /api/v1/auth/logout` and
 `GET /api/v1/auth/session`. Business endpoints remain under

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -42,6 +42,7 @@ pub struct WorkerState {
     cover_url_policy: CoverUrlPolicy,
     login_admission: crate::login_admission::LoginAdmission,
     dummy_password_hash: Arc<String>,
+    static_dir: PathBuf,
 }
 
 impl WorkerState {
@@ -50,6 +51,7 @@ impl WorkerState {
         secrets: SecretBox,
         auth: InternalAuth,
         production: bool,
+        static_dir: PathBuf,
     ) -> anyhow::Result<Self> {
         let dummy_password_hash =
             crate::auth::hash_password("sunshine-dummy-password-value-that-is-never-accepted")
@@ -74,6 +76,7 @@ impl WorkerState {
             cover_url_policy: CoverUrlPolicy::default(),
             login_admission: crate::login_admission::LoginAdmission::default(),
             dummy_password_hash: Arc::new(dummy_password_hash),
+            static_dir,
         })
     }
 
@@ -165,12 +168,11 @@ pub fn router(state: WorkerState) -> Router {
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
 
+    let static_dir = state.static_dir.clone();
     Router::new()
         .merge(public)
         .merge(protected)
-        .fallback_service(ServeDir::new(
-            std::env::var("SUNSHINE_MANAGER_STATIC_DIR").unwrap_or_else(|_| "web/dist".to_string()),
-        ))
+        .fallback_service(ServeDir::new(static_dir))
         .with_state(state)
 }
 
@@ -906,6 +908,10 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use tower::ServiceExt;
 
+    fn test_static_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web")
+    }
+
     async fn test_router() -> Router {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -923,6 +929,7 @@ mod tests {
             )
             .unwrap(),
             true,
+            test_static_dir(),
         )
         .unwrap();
         router(state).layer(Extension(ConnectInfo(SocketAddr::from((
@@ -1017,6 +1024,7 @@ mod tests {
             )
             .unwrap(),
             false,
+            test_static_dir(),
         )
         .unwrap();
         let application = router(state).layer(Extension(ConnectInfo(SocketAddr::from((
@@ -1170,6 +1178,7 @@ mod tests {
             )
             .unwrap(),
             false,
+            test_static_dir(),
         )
         .unwrap();
         let actor: String =

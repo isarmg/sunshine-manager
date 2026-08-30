@@ -4,11 +4,12 @@
   "title": "Sunshine Manager 0.7.0 configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": ["database_url", "credential_key"],
+  "required": ["database_url", "credential_key", "static_dir"],
   "properties": {
     "database_url": { "type": "string", "minLength": 1 },
     "credential_key": { "type": "string", "minLength": 43 },
     "credential_key_id": { "type": "string", "minLength": 1, "default": "primary" },
+    "static_dir": { "type": "string", "pattern": "^/" },
     "bind": { "type": "string", "default": "127.0.0.1:18104" },
     "session_ttl_seconds": { "type": "integer", "minimum": 1, "default": 43200 },
     "session_idle_ttl_seconds": { "type": "integer", "minimum": 1, "default": 1800 },

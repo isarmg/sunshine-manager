@@ -117,6 +117,7 @@ async fn serve() -> anyhow::Result<()> {
         config.secrets,
         config.internal_auth,
         config.production,
+        config.static_dir,
     )?
     .with_cover_url_policy(config.cover_url_policy);
     let recovered = state.operation_manager().recover_startup().await?;
