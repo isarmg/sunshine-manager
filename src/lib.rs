@@ -3,19 +3,15 @@
 //! It owns its SQLite schema, local administrator sessions and upstream
 //! Sunshine credentials.
 
-pub mod application;
 pub mod auth;
-pub mod cli;
 pub mod client;
 pub mod config;
 pub mod cover_policy;
 pub mod crypto;
 pub mod database_schema;
 pub mod db;
-pub mod domain;
 pub mod error;
 pub mod http;
-pub mod infrastructure;
 pub mod login_admission;
 pub mod model;
 pub mod operations;
