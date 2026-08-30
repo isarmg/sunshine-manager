@@ -1,7 +1,5 @@
 //! Product-owned encryption for Sunshine upstream passwords.
 
-use std::collections::BTreeMap;
-
 use aes_gcm::{
     Aes256Gcm, Key, Nonce,
     aead::{Aead, AeadCore, KeyInit, OsRng},
@@ -16,7 +14,6 @@ const PREFIX: &str = "sunshine:v1:";
 pub struct SecretBox {
     current_id: String,
     current: [u8; 32],
-    previous: BTreeMap<String, [u8; 32]>,
 }
 
 impl SecretBox {
@@ -25,21 +22,7 @@ impl SecretBox {
         Ok(Self {
             current_id,
             current,
-            previous: BTreeMap::new(),
         })
-    }
-
-    pub fn with_previous(mut self, id: impl Into<String>, key: [u8; 32]) -> anyhow::Result<Self> {
-        let id = validate_key_id(id.into())?;
-        anyhow::ensure!(
-            id != self.current_id,
-            "previous key id duplicates current key id"
-        );
-        anyhow::ensure!(
-            self.previous.insert(id.clone(), key).is_none(),
-            "duplicate previous key id {id}"
-        );
-        Ok(self)
     }
 
     pub fn encrypt(&self, value: &str) -> AppResult<String> {
@@ -54,12 +37,10 @@ impl SecretBox {
     pub fn decrypt(&self, value: &str) -> AppResult<String> {
         let rest = value.strip_prefix(PREFIX).ok_or(AppError::Crypto)?;
         let (id, payload) = rest.split_once(':').ok_or(AppError::Crypto)?;
-        let key = if id == self.current_id {
-            &self.current
-        } else {
-            self.previous.get(id).ok_or(AppError::Crypto)?
-        };
-        let plaintext = open(key, &decode_payload(payload)?)?;
+        if id != self.current_id {
+            return Err(AppError::Crypto);
+        }
+        let plaintext = open(&self.current, &decode_payload(payload)?)?;
         String::from_utf8(plaintext).map_err(|_| AppError::Crypto)
     }
 
@@ -119,5 +100,14 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(secrets.decrypt(&first).unwrap(), "password");
         assert!(!first.contains("password"));
+    }
+
+    #[test]
+    fn ciphertext_for_another_key_id_is_not_a_runtime_compatibility_path() {
+        let old = SecretBox::new("old", [3; 32]).unwrap();
+        let current = SecretBox::new("current", [4; 32]).unwrap();
+        let ciphertext = old.encrypt("password").unwrap();
+
+        assert!(current.decrypt(&ciphertext).is_err());
     }
 }

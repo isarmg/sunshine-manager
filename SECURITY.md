@@ -27,6 +27,8 @@ durable operation requests are encrypted at rest with `SUNSHINE_MANAGER_CREDENTI
 that key separately from the database, restrict both to the `isarmg-sunshine` account and include
 the key identifier in recovery procedures. Losing the key makes encrypted host credentials and
 pending requests unrecoverable. A database copy without the key is not a usable full backup.
+The runtime accepts only the configured current key identifier. Key rotation and re-encryption are
+offline upgrade operations; the product does not retain previous decryption keys.
 
 Run one service process per SQLite database. The process holds an exclusive instance lock for its
 full lifetime. The separate `isarmg-upgrade` tool shares the maintenance lock for online backup;

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sarmg.org/sunshine-manager/config-v1.schema.json",
-  "title": "Sunshine Manager configuration",
+  "$id": "https://sarmg.org/sunshine-manager/0.7.0/config.schema.json",
+  "title": "Sunshine Manager 0.7.0 configuration",
   "type": "object",
   "additionalProperties": false,
   "required": ["database_url", "credential_key"],

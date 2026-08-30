@@ -89,6 +89,10 @@ Use the independent `isarmg-upgrade` repository for version-to-version adapters,
 backup, verification and restore. It is an offline operations tool and is not a Sunshine Manager
 runtime dependency.
 
+The runtime accepts only `SUNSHINE_MANAGER_CREDENTIAL_KEY_ID` and its current key. Re-encrypting
+data for a replacement key is an explicit offline `isarmg-upgrade` operation; Sunshine Manager
+does not carry a previous-key compatibility keyring.
+
 `doctor` verifies the product schema, SQLite integrity and foreign keys, proves that the database
 accepts a transaction which is then rolled back, and decrypts all stored host credentials and
 durable operation requests with the configured credential key. It never contacts a Sunshine host
