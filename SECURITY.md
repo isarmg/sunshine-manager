@@ -3,26 +3,49 @@
 ## Reporting a vulnerability
 
 Do not disclose security vulnerabilities in a public issue. Use GitHub
-[private vulnerability reporting](https://github.com/isarmg/sunshine-worker/security/advisories/new).
-If that channel is unavailable, open an issue that asks for a private contact
-without including vulnerability details.
+[private vulnerability reporting](https://github.com/isarmg/sunshine-manager/security/advisories/new).
+If that channel is unavailable, open an issue asking for a private contact without including
+vulnerability details.
 
-Include the affected revision, reproduction steps and expected impact. The
-maintainer aims to acknowledge reports within 72 hours and provide an initial
-assessment within seven days.
+Include the affected release or revision, reproduction steps and expected impact. The maintainer
+aims to acknowledge reports within 72 hours and provide an initial assessment within seven days.
 
 ## Supported boundary
 
-Only the revision included in the current Union release receives security
-fixes. This repository does not publish a standalone operator-facing service.
+Security fixes target the latest released Sunshine Manager version and the current `main` branch.
+Sunshine Manager is a standalone service: it owns its browser authentication, administrator RBAC,
+CSRF checks, SQLite database, migrations, operation queue and audit outbox. It has no central
+gateway, shared session service or PostgreSQL dependency.
 
-The worker must bind to loopback, is supervised by Union, and accepts only the
-process-scoped `gateway-v1` contract. Union is the sole public ingress and owns
-browser authentication, RBAC, CSRF protection, route authorization and request
-identity. The internal gateway token authenticates Union to this worker; it is
-not an end-user credential.
+The default listener is loopback-only. A production deployment must terminate HTTPS at a trusted
+reverse proxy, preserve the original `Host` header and use secure session cookies. Development
+cookies are accepted only with an explicit development setting and a loopback bind address. Do not
+publish the application over cleartext HTTP or rely on untrusted forwarded-address headers.
 
-The module owns its PostgreSQL database/schema, migrations and encryption key.
-It must not receive Core database access, browser cookies or another module's
-storage. The process boundary provides lifecycle and failure isolation, not an
-OS sandbox: official Builder-bundled modules remain trusted release code.
+The service stores only hashes of random browser session and CSRF tokens. Sunshine credentials and
+durable operation requests are encrypted at rest with `SUNSHINE_MANAGER_CREDENTIAL_KEY`; protect
+that key separately from the database, restrict both to the `isarmg-sunshine` account and include
+the key identifier in recovery procedures. Losing the key makes encrypted host credentials and
+pending requests unrecoverable. A database copy without the key is not a usable full backup.
+
+Run one service process per SQLite database. The process holds an exclusive instance lock for its
+full lifetime. Online backup shares the maintenance lock, while restore, migrations and
+administrator maintenance require the service to be stopped. Never copy only the main database
+file from a live WAL database; use `backup-create` and validate it with `backup-verify`.
+
+## External systems
+
+Configured Sunshine hosts and their responses are untrusted network peers. Prefer HTTPS with
+certificate verification enabled, restrict host addresses at the deployment firewall and avoid
+credentials with privileges beyond the managed Sunshine instance. Disabling upstream TLS
+verification removes server authentication and is not recommended for production.
+
+Cover URLs must use HTTPS, match `SUNSHINE_MANAGER_COVER_URL_ALLOWLIST` and resolve only to public
+addresses when accepted and immediately before dispatch. The managed Sunshine host performs the
+actual fetch, so its own network must also block private, link-local, loopback and metadata
+destinations and unsafe redirects. The manager-side allowlist is not a substitute for Sunshine
+host egress controls.
+
+An operation in `unknown` state may already have changed the remote Sunshine host. Investigate and
+reconcile the remote state before retrying; do not automatically replay it with a new idempotency
+key.

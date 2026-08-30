@@ -47,8 +47,10 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
         .await?)
 }
 
-/// Run only module-owned migrations. The deployment must provision the
-/// `sunshine` schema and make the worker role its owner before startup.
+/// Run this product's embedded SQLite migrations.
+///
+/// Deployment must create the database parent directory for the Sunshine
+/// Manager service account; the application creates the database file itself.
 pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     MIGRATOR.run(pool).await?;
     Ok(())

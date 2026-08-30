@@ -1,4 +1,4 @@
-//! Module-owned encryption for Sunshine upstream passwords.
+//! Product-owned encryption for Sunshine upstream passwords.
 
 use std::collections::BTreeMap;
 
