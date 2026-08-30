@@ -24,7 +24,10 @@ use crate::{
         ClientUpdateRequest, CoverUploadRequest, HealthSnapshot, Host, HostInfo, HostPatchRequest,
         HostSaveRequest, HostStatus, PinRequest, ProbeStatus, UnpairRequest, web_url,
     },
-    operations::HostMutationLocks,
+    operations::{
+        HostMutationLocks, OperationManager, OperationView, RemoteOperationRequest,
+        validate_idempotency_key,
+    },
 };
 
 #[derive(Clone)]
@@ -35,7 +38,7 @@ pub struct WorkerState {
     pub production: bool,
     upstream: UpstreamClient,
     health: Arc<RwLock<HashMap<String, HealthSnapshot>>>,
-    mutation_locks: HostMutationLocks,
+    operations: OperationManager,
     cover_url_policy: CoverUrlPolicy,
     login_admission: crate::login_admission::LoginAdmission,
     dummy_password_hash: Arc<String>,
@@ -51,14 +54,23 @@ impl WorkerState {
         let dummy_password_hash =
             crate::auth::hash_password("sunshine-dummy-password-value-that-is-never-accepted")
                 .map_err(|error| anyhow::anyhow!(error))?;
+        let upstream = UpstreamClient::new()?;
+        let mutation_locks = HostMutationLocks::default();
+        let operations = OperationManager::new(
+            pool.clone(),
+            secrets.clone(),
+            production,
+            mutation_locks,
+            upstream.clone(),
+        );
         Ok(Self {
             pool,
             secrets,
             auth,
             production,
-            upstream: UpstreamClient::new()?,
+            upstream,
             health: Arc::new(RwLock::new(HashMap::new())),
-            mutation_locks: HostMutationLocks::default(),
+            operations,
             cover_url_policy: CoverUrlPolicy::default(),
             login_admission: crate::login_admission::LoginAdmission::default(),
             dummy_password_hash: Arc::new(dummy_password_hash),
@@ -66,8 +78,13 @@ impl WorkerState {
     }
 
     pub fn with_cover_url_policy(mut self, policy: CoverUrlPolicy) -> Self {
+        self.operations = self.operations.with_cover_url_policy(policy.clone());
         self.cover_url_policy = policy;
         self
+    }
+
+    pub fn operation_manager(&self) -> &OperationManager {
+        &self.operations
     }
 }
 
@@ -81,6 +98,10 @@ pub fn router(state: WorkerState) -> Router {
     let protected = Router::new()
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/session", get(session))
+        .route(
+            "/api/services/sunshine/operations/{operation_id}",
+            get(operation_get),
+        )
         .route(
             "/api/services/sunshine/hosts",
             get(list_hosts).post(create_host),
@@ -377,7 +398,7 @@ async fn update_host(
     Path(id): Path<String>,
     Json(request): Json<HostPatchRequest>,
 ) -> AppResult<Json<HostInfo>> {
-    let _guard = state.mutation_locks.lock(&id).await;
+    let _guard = state.operations.lock_host(&id).await;
     let host = db::update_host(
         &state.pool,
         &state.secrets,
@@ -400,7 +421,7 @@ async fn delete_host(
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
-    let _guard = state.mutation_locks.lock(&id).await;
+    let _guard = state.operations.lock_host(&id).await;
     let deleted_id = id.clone();
     db::delete_host(&state.pool, &id, &identity.subject).await?;
     state.health.write().await.remove(&deleted_id);
@@ -446,20 +467,16 @@ async fn apps_save(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<(StatusCode, Json<OperationView>)> {
     validate_object(&body, 256 * 1024)?;
-    let detail = body
-        .get("name")
-        .and_then(Value::as_str)
-        .map(|name| format!("name={}", name.trim()));
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.app.save",
-        detail,
-        move |client, host| async move { client.apps_save(&host, &body).await },
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::AppsSave { body },
     )
     .await
 }
@@ -468,14 +485,14 @@ async fn apps_close(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
-) -> AppResult<Json<Value>> {
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.app.close",
-        None,
-        |client, host| async move { client.apps_close(&host).await },
+    headers: HeaderMap,
+) -> AppResult<(StatusCode, Json<OperationView>)> {
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::AppsClose,
     )
     .await
 }
@@ -484,15 +501,15 @@ async fn apps_delete(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path((id, index)): Path<(String, u32)>,
-) -> AppResult<Json<Value>> {
+    headers: HeaderMap,
+) -> AppResult<(StatusCode, Json<OperationView>)> {
     validate_index(index)?;
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.app.delete",
-        Some(format!("index={index}")),
-        move |client, host| async move { client.apps_delete(&host, index).await },
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::AppsDelete { index },
     )
     .await
 }
@@ -513,16 +530,16 @@ async fn clients_unpair(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<UnpairRequest>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<(StatusCode, Json<OperationView>)> {
     let uuid = validate_opaque("client uuid", &body.uuid, 128)?.to_string();
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.client.unpair",
-        Some(format!("client={uuid}")),
-        move |client, host| async move { client.clients_unpair(&host, &uuid).await },
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::ClientsUnpair { uuid },
     )
     .await
 }
@@ -531,14 +548,14 @@ async fn clients_unpair_all(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
-) -> AppResult<Json<Value>> {
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.client.unpair_all",
-        None,
-        |client, host| async move { client.clients_unpair_all(&host).await },
+    headers: HeaderMap,
+) -> AppResult<(StatusCode, Json<OperationView>)> {
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::ClientsUnpairAll,
     )
     .await
 }
@@ -547,17 +564,17 @@ async fn clients_update(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<ClientUpdateRequest>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<(StatusCode, Json<OperationView>)> {
     let uuid = validate_opaque("client uuid", &body.uuid, 128)?.to_string();
     let enabled = body.enabled;
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.client.update",
-        Some(format!("client={uuid} enabled={enabled}")),
-        move |client, host| async move { client.clients_update(&host, &uuid, enabled).await },
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::ClientsUpdate { uuid, enabled },
     )
     .await
 }
@@ -578,16 +595,16 @@ async fn config_save(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<(StatusCode, Json<OperationView>)> {
     validate_object(&body, 1024 * 1024)?;
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.config.save",
-        Some("config updated".into()),
-        move |client, host| async move { client.config_save(&host, &body).await },
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::ConfigSave { body },
     )
     .await
 }
@@ -614,20 +631,20 @@ async fn pin(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<PinRequest>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<(StatusCode, Json<OperationView>)> {
     let pin = body.pin.trim().to_string();
     if !(4..=8).contains(&pin.len()) || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(AppError::BadRequest("PIN must contain 4-8 digits".into()));
     }
     let name = validate_opaque("client name", &body.name, 80)?.to_string();
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.client.pair",
-        Some(format!("name={name}")),
-        move |client, host| async move { client.pin(&host, &pin, &name).await },
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::Pin { pin, name },
     )
     .await
 }
@@ -636,14 +653,14 @@ async fn restart(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
-) -> AppResult<Json<Value>> {
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.system.restart",
-        None,
-        |client, host| async move { client.restart(&host).await },
+    headers: HeaderMap,
+) -> AppResult<(StatusCode, Json<OperationView>)> {
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::Restart,
     )
     .await
 }
@@ -652,14 +669,14 @@ async fn reset_display(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
-) -> AppResult<Json<Value>> {
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.display.reset",
-        None,
-        |client, host| async move { client.reset_display(&host).await },
+    headers: HeaderMap,
+) -> AppResult<(StatusCode, Json<OperationView>)> {
+    enqueue_remote(
+        &state,
+        &identity,
+        &id,
+        &headers,
+        RemoteOperationRequest::ResetDisplay,
     )
     .await
 }
@@ -688,45 +705,72 @@ async fn cover_upload(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<CoverUploadRequest>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<(StatusCode, Json<OperationView>)> {
     let key = validate_opaque("cover key", &body.key, 512)?.to_string();
-    let url = state.cover_url_policy.validate(&body.url).await?;
-    mutate(
-        state,
-        identity,
-        id,
-        "sunshine.cover.upload",
-        Some(format!("key={key}")),
-        move |client, host| async move { client.cover_upload(&host, &key, &url).await },
-    )
-    .await
+    let request = RemoteOperationRequest::CoverUpload { key, url: body.url };
+    let idempotency_key = idempotency_key(&headers)?;
+    if let Some(operation) = state
+        .operations
+        .find_idempotent(&identity.subject, &id, idempotency_key, &request)
+        .await?
+    {
+        return Ok((StatusCode::ACCEPTED, Json(operation)));
+    }
+    let RemoteOperationRequest::CoverUpload { url, .. } = &request else {
+        unreachable!();
+    };
+    state.cover_url_policy.validate(url).await?;
+    enqueue_remote(&state, &identity, &id, &headers, request).await
 }
 
-async fn mutate<F, Fut>(
-    state: WorkerState,
-    identity: InternalIdentity,
-    id: String,
-    action: &'static str,
-    detail: Option<String>,
-    operation: F,
-) -> AppResult<Json<Value>>
-where
-    F: FnOnce(UpstreamClient, Host) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = AppResult<Value>> + Send + 'static,
-{
-    let _guard = state.mutation_locks.lock(&id).await;
-    let host = load_host(&state, &id).await?;
-    let value = operation(state.upstream.clone(), host).await?;
-    db::audit_best_effort(
-        &state.pool,
-        action,
-        &id,
-        &identity.subject,
-        detail.as_deref(),
-    )
-    .await;
-    Ok(Json(value))
+async fn operation_get(
+    State(state): State<WorkerState>,
+    Extension(identity): Extension<InternalIdentity>,
+    Path(operation_id): Path<String>,
+) -> AppResult<Json<OperationView>> {
+    if operation_id.is_empty() || operation_id.len() > 64 {
+        return Err(AppError::NotFound("operation not found".into()));
+    }
+    Ok(Json(
+        state
+            .operations
+            .get_for_actor(&identity.subject, &operation_id)
+            .await?,
+    ))
+}
+
+async fn enqueue_remote(
+    state: &WorkerState,
+    identity: &InternalIdentity,
+    host_id: &str,
+    headers: &HeaderMap,
+    request: RemoteOperationRequest,
+) -> AppResult<(StatusCode, Json<OperationView>)> {
+    let key = idempotency_key(headers)?;
+    let operation = state
+        .operations
+        .enqueue(&identity.subject, host_id, key, request)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(operation)))
+}
+
+fn idempotency_key(headers: &HeaderMap) -> AppResult<&str> {
+    let mut values = headers.get_all("idempotency-key").iter();
+    let value = values.next().ok_or_else(|| {
+        AppError::BadRequest("Idempotency-Key is required for remote mutations".into())
+    })?;
+    if values.next().is_some() {
+        return Err(AppError::BadRequest(
+            "exactly one Idempotency-Key is required".into(),
+        ));
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| AppError::BadRequest("invalid Idempotency-Key".into()))?;
+    validate_idempotency_key(value)?;
+    Ok(value)
 }
 
 async fn load_host(state: &WorkerState, id: &str) -> AppResult<Host> {
@@ -1082,5 +1126,241 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn remote_mutation_requires_idempotency_and_returns_queryable_operation() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::migrate(&pool).await.unwrap();
+        db::ensure_admin_user(
+            &pool,
+            "admin@example.com",
+            Some("correct horse battery staple"),
+        )
+        .await
+        .unwrap();
+        let secrets = SecretBox::new("test", [12; 32]).unwrap();
+        let host = db::insert_host(
+            &pool,
+            &secrets,
+            HostSaveRequest {
+                name: "Desktop".into(),
+                host: "127.0.0.1".into(),
+                web_port: 47_990,
+                username: "sunshine".into(),
+                password: Some("upstream-secret".into()),
+                verify_tls: false,
+            },
+            false,
+            "bootstrap",
+        )
+        .await
+        .unwrap();
+        let state = WorkerState::new(
+            pool.clone(),
+            secrets,
+            InternalAuth::new(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(30),
+                false,
+            )
+            .unwrap(),
+            false,
+        )
+        .unwrap();
+        let actor: String =
+            sqlx::query_scalar("SELECT user_id FROM auth_users WHERE email='admin@example.com'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let existing_cover = state
+            .operations
+            .enqueue(
+                &actor,
+                &host.id,
+                "cover-browser-1",
+                RemoteOperationRequest::CoverUpload {
+                    key: "cover-key".into(),
+                    url: "https://covers.invalid/art.jpg?signature=stable-secret".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let application = router(state).layer(Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            42_000,
+        )))));
+
+        let login = application
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"email":"admin@example.com","password":"correct horse battery staple"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().split(';').next().unwrap())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let login_body: Value =
+            serde_json::from_slice(&login.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let csrf = login_body["csrf_token"].as_str().unwrap();
+        let restart_url = format!("/api/services/sunshine/hosts/{}/restart", host.id);
+
+        let missing_key = application
+            .clone()
+            .oneshot(
+                Request::post(&restart_url)
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", csrf)
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_key.status(), StatusCode::BAD_REQUEST);
+
+        let accepted = application
+            .clone()
+            .oneshot(
+                Request::post(&restart_url)
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", csrf)
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header("idempotency-key", "restart-browser-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let accepted_body: Value =
+            serde_json::from_slice(&accepted.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(accepted_body["state"], "pending");
+        let operation_id = accepted_body["operation_id"].as_str().unwrap().to_string();
+
+        let repeated = application
+            .clone()
+            .oneshot(
+                Request::post(&restart_url)
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", csrf)
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header("idempotency-key", "restart-browser-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+        let repeated_body: Value =
+            serde_json::from_slice(&repeated.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(repeated_body["operation_id"], operation_id);
+
+        let query = application
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/services/sunshine/operations/{operation_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(query.status(), StatusCode::OK);
+        let query_body: Value =
+            serde_json::from_slice(&query.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(query_body["operation_id"], operation_id);
+        for forbidden in ["actor", "action", "request", "error_code", "error_message"] {
+            assert!(query_body.get(forbidden).is_none());
+        }
+
+        let config_url = format!("/api/services/sunshine/hosts/{}/config", host.id);
+        for (body, expected) in [
+            (r#"{"private":"first-value"}"#, StatusCode::ACCEPTED),
+            (r#"{"private":"second-value"}"#, StatusCode::CONFLICT),
+        ] {
+            let response = application
+                .clone()
+                .oneshot(
+                    Request::post(&config_url)
+                        .header(header::COOKIE, &cookie)
+                        .header("x-csrf-token", csrf)
+                        .header(header::HOST, "localhost")
+                        .header(header::ORIGIN, "http://localhost")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "config-browser-1")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let config_ciphertext: String = sqlx::query_scalar(
+            "SELECT request_ciphertext FROM operations WHERE action='sunshine.config.save'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!config_ciphertext.contains("first-value"));
+        assert!(!config_ciphertext.contains("second-value"));
+
+        let cover_url = format!("/api/services/sunshine/hosts/{}/covers/upload", host.id);
+        for (signature, expected) in [
+            ("stable-secret", StatusCode::ACCEPTED),
+            ("different-secret", StatusCode::CONFLICT),
+        ] {
+            let response = application
+                .clone()
+                .oneshot(
+                    Request::post(&cover_url)
+                        .header(header::COOKIE, &cookie)
+                        .header("x-csrf-token", csrf)
+                        .header(header::HOST, "localhost")
+                        .header(header::ORIGIN, "http://localhost")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "cover-browser-1")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "key": "cover-key",
+                                "url": format!(
+                                    "https://covers.invalid/art.jpg?signature={signature}"
+                                )
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::ACCEPTED {
+                let body: Value = serde_json::from_slice(
+                    &response.into_body().collect().await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                assert_eq!(body["operation_id"], existing_cover.operation_id);
+            }
+        }
     }
 }

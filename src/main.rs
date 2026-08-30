@@ -157,9 +157,19 @@ async fn serve() -> anyhow::Result<()> {
         config.production,
     )?
     .with_cover_url_policy(config.cover_url_policy);
+    let recovered = state.operation_manager().recover_startup().await?;
+    if let Err(error) = state.operation_manager().deliver_outbox().await {
+        tracing::warn!(%error, "initial audit outbox delivery failed; background retry will continue");
+    }
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    tracing::info!(bind = %config.bind, schema = db::SCHEMA, "Sunshine manager ready");
+    tracing::info!(
+        bind = %config.bind,
+        schema = db::SCHEMA,
+        recovered_running_operations = recovered,
+        "Sunshine manager ready"
+    );
     let probe = tokio::spawn(probe_loop(state.clone()));
+    let operations = tokio::spawn(state.operation_manager().clone().run());
     let result = axum::serve(
         listener,
         router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -167,6 +177,7 @@ async fn serve() -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown())
     .await;
     probe.abort();
+    operations.abort();
     result?;
     Ok(())
 }

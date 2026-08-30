@@ -11,7 +11,14 @@ use uuid::Uuid;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-const REQUIRED_TABLES: [&str; 4] = ["hosts", "audit_logs", "auth_users", "auth_sessions"];
+const REQUIRED_TABLES: [&str; 6] = [
+    "hosts",
+    "audit_logs",
+    "auth_users",
+    "auth_sessions",
+    "operations",
+    "audit_outbox",
+];
 
 pub fn create(database_url: &str, output: &Path) -> anyhow::Result<()> {
     let source = database_path(database_url)?;
@@ -56,13 +63,55 @@ pub fn verify(path: &Path) -> anyhow::Result<()> {
 
     let table_count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master \
-         WHERE type='table' AND name IN ('hosts','audit_logs','auth_users','auth_sessions')",
+         WHERE type='table' AND name IN (\
+             'hosts','audit_logs','auth_users','auth_sessions','operations','audit_outbox'\
+         )",
         [],
         |row| row.get(0),
     )?;
     ensure!(
         table_count == REQUIRED_TABLES.len() as i64,
         "backup is not a complete Sunshine Manager database"
+    );
+    let operation_columns: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('operations') \
+         WHERE name IN (\
+             'operation_id','actor','host_id','action','idempotency_key_hash',\
+             'request_fingerprint','request_ciphertext','state','attempt',\
+             'created_at_micros','updated_at_micros','started_at_micros',\
+             'completed_at_micros','error_code'\
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    let outbox_columns: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('audit_outbox') \
+         WHERE name IN (\
+             'outbox_id','operation_id','event_kind','action','target','actor',\
+             'detail','created_at_micros','delivered_at_micros','delivery_attempt'\
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    let audit_outbox_column: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('audit_logs') WHERE name='outbox_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    let operation_indexes: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN (\
+             'operations_idempotency_idx','audit_logs_outbox_id_idx',\
+             'audit_outbox_operation_event_idx'\
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        operation_columns == 14
+            && outbox_columns == 10
+            && audit_outbox_column == 1
+            && operation_indexes == 3,
+        "backup is missing the durable operation or audit outbox schema"
     );
     Ok(())
 }
@@ -292,6 +341,11 @@ mod tests {
             .unwrap();
         connection
             .execute_batch(include_str!("../migrations/202608290002_auth_sessions.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../migrations/202608290003_persistent_operations.sql"
+            ))
             .unwrap();
         connection
             .execute_batch(

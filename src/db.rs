@@ -56,11 +56,38 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
 
 pub async fn ready(pool: &SqlitePool) -> bool {
     sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('hosts','audit_logs','auth_users','auth_sessions')",
+        r#"SELECT
+             (SELECT COUNT(*) FROM sqlite_master
+              WHERE type='table' AND name IN (
+                  'hosts','audit_logs','auth_users','auth_sessions','operations','audit_outbox'
+              )) = 6
+             AND
+             (SELECT COUNT(*) FROM pragma_table_info('operations')
+              WHERE name IN (
+                  'operation_id','actor','host_id','action','idempotency_key_hash',
+                  'request_fingerprint','request_ciphertext','state','attempt',
+                  'created_at_micros','updated_at_micros','started_at_micros',
+                  'completed_at_micros','error_code'
+              )) = 14
+             AND
+             (SELECT COUNT(*) FROM pragma_table_info('audit_outbox')
+              WHERE name IN (
+                  'outbox_id','operation_id','event_kind','action','target','actor',
+                  'detail','created_at_micros','delivered_at_micros','delivery_attempt'
+              )) = 10
+             AND
+             (SELECT COUNT(*) FROM pragma_table_info('audit_logs')
+              WHERE name='outbox_id') = 1
+             AND
+             (SELECT COUNT(*) FROM sqlite_master
+              WHERE type='index' AND name IN (
+                  'operations_idempotency_idx','audit_logs_outbox_id_idx',
+                  'audit_outbox_operation_event_idx'
+              )) = 3"#,
     )
     .fetch_one(pool)
     .await
-    .map(|count| count == 4)
+    .map(|ready| ready != 0)
     .unwrap_or(false)
 }
 
@@ -425,24 +452,6 @@ pub async fn delete_host(pool: &SqlitePool, id: &str, actor: &str) -> AppResult<
     Ok(())
 }
 
-pub async fn audit_best_effort(
-    pool: &SqlitePool,
-    action: &str,
-    target: &str,
-    actor: &str,
-    detail: Option<&str>,
-) {
-    let result = async {
-        let mut transaction = pool.begin().await?;
-        insert_audit(&mut transaction, action, target, actor, detail).await?;
-        transaction.commit().await
-    }
-    .await;
-    if let Err(error) = result {
-        tracing::warn!(%error, action, target, "upstream mutation succeeded but audit insert failed");
-    }
-}
-
 pub(crate) async fn get_stored_host(
     pool: &SqlitePool,
     id: &str,
@@ -673,6 +682,17 @@ mod tests {
             get_host(&pool, &secrets, &created.id).await,
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_the_operation_and_outbox_schema() {
+        let pool = migrated_pool().await;
+        assert!(ready(&pool).await);
+        sqlx::query("DROP TABLE audit_outbox")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!ready(&pool).await);
     }
 
     #[tokio::test]
