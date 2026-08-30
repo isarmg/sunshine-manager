@@ -912,7 +912,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        db::migrate(&pool).await.unwrap();
+        db::initialize_empty(&pool).await.unwrap();
         let state = WorkerState::new(
             pool,
             SecretBox::new("test", [2; 32]).unwrap(),
@@ -999,7 +999,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        db::migrate(&pool).await.unwrap();
+        db::initialize_empty(&pool).await.unwrap();
         db::ensure_admin_user(
             &pool,
             "admin@example.com",
@@ -1135,7 +1135,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        db::migrate(&pool).await.unwrap();
+        db::initialize_empty(&pool).await.unwrap();
         db::ensure_admin_user(
             &pool,
             "admin@example.com",

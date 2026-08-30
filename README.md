@@ -73,17 +73,21 @@ restart.
 Run exactly one active Sunshine Manager process for each SQLite database. The process now holds
 an exclusive, non-blocking instance lock beside that database for its full lifetime, so a second
 worker fails closed instead of bypassing the process-local per-host execution mutex. A separate
-shared maintenance lock lets `backup-create` use SQLite Online Backup while the service runs;
-`restore`, migration and administrator maintenance take it exclusively and therefore require the
-service to be stopped.
+shared maintenance lock lets the independent `isarmg-upgrade` tool take a consistent online
+backup. Restore, upgrade and administrator maintenance take the lock exclusively and therefore
+require the service to be stopped.
 
-## Backup and restore
+## Current database contract
 
-`backup-create` uses SQLite's online backup API, refuses to overwrite an existing output,
-and verifies integrity, foreign keys and the product schema before reporting success.
-`backup-verify` performs the same read-only checks. Stop the service before `restore`; the
-command first validates and reconstructs the backup beside the destination, then atomically
-replaces the database and verifies the restored file.
+Version 0.7.0 creates exactly one current schema in a database file that does not yet exist.
+Every existing database must contain the exact `sunshine-manager` application version, schema
+revision and canonical DDL fingerprint. Missing metadata, an older version, a migration ledger or
+schema drift is rejected without modifying the database or its sidecars. There is no migration,
+backup or restore implementation in this product.
+
+Use the independent `isarmg-upgrade` repository for version-to-version adapters, consistent
+backup, verification and restore. It is an offline operations tool and is not a Sunshine Manager
+runtime dependency.
 
 `doctor` verifies the product schema, SQLite integrity and foreign keys, proves that the database
 accepts a transaction which is then rolled back, and decrypts all stored host credentials and

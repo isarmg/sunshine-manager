@@ -1073,8 +1073,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("operations.sqlite3");
         let database_url = format!("sqlite://{}", path.display());
-        let pool = db::connect(&database_url).await.unwrap();
-        db::migrate(&pool).await.unwrap();
+        let pool = db::open_or_initialize(&database_url).await.unwrap();
         let secrets = SecretBox::new("test", [41; 32]).unwrap();
         let host_id = insert_test_host(&pool, &secrets, "host-a").await;
         let manager = OperationManager::new(
@@ -1469,8 +1468,7 @@ mod tests {
         drop(manager);
         pool.close().await;
 
-        let reopened = db::connect(&database_url).await.unwrap();
-        db::migrate(&reopened).await.unwrap();
+        let reopened = db::open_existing(&database_url).await.unwrap();
         let restarted = OperationManager::new(
             reopened.clone(),
             secrets,

@@ -67,7 +67,7 @@ struct LockPaths {
 }
 
 fn lock_paths(database_url: &str) -> anyhow::Result<LockPaths> {
-    let database = crate::backup::database_path(database_url)?;
+    let database = crate::database_schema::database_path(database_url)?;
     let parent = database.parent().unwrap_or_else(|| Path::new("."));
     require_real_directory(parent)?;
     let name = database

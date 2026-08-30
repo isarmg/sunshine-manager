@@ -14,7 +14,7 @@ aims to acknowledge reports within 72 hours and provide an initial assessment wi
 
 Security fixes target the latest released Sunshine Manager version and the current `main` branch.
 Sunshine Manager is a standalone service: it owns its browser authentication, administrator RBAC,
-CSRF checks, SQLite database, migrations, operation queue and audit outbox. It has no central
+CSRF checks, exact-current SQLite schema, operation queue and audit outbox. It has no central
 gateway, shared session service or PostgreSQL dependency.
 
 The default listener is loopback-only. A production deployment must terminate HTTPS at a trusted
@@ -29,9 +29,9 @@ the key identifier in recovery procedures. Losing the key makes encrypted host c
 pending requests unrecoverable. A database copy without the key is not a usable full backup.
 
 Run one service process per SQLite database. The process holds an exclusive instance lock for its
-full lifetime. Online backup shares the maintenance lock, while restore, migrations and
-administrator maintenance require the service to be stopped. Never copy only the main database
-file from a live WAL database; use `backup-create` and validate it with `backup-verify`.
+full lifetime. The separate `isarmg-upgrade` tool shares the maintenance lock for online backup;
+restore, version upgrade and administrator maintenance require its exclusive mode. The product
+does not read old schemas or implement migration, backup or restore.
 
 ## External systems
 

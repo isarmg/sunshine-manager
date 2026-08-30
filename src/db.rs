@@ -1,13 +1,6 @@
-use std::{
-    str::FromStr,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use sqlx::{
-    Sqlite, SqlitePool, Transaction,
-    migrate::Migrator,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
-};
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::{
     auth::{InternalAuth, IssuedSession},
@@ -17,7 +10,7 @@ use crate::{
 };
 
 pub const SCHEMA: &str = "sunshine";
-static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+pub use crate::database_schema::{initialize_empty, open_existing, open_or_initialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub(crate) struct StoredHost {
@@ -33,64 +26,8 @@ pub(crate) struct StoredHost {
     pub updated_at_micros: i64,
 }
 
-pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
-    let options = SqliteConnectOptions::from_str(database_url)?
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .foreign_keys(true)
-        .busy_timeout(Duration::from_secs(5))
-        .synchronous(SqliteSynchronous::Full);
-    Ok(SqlitePoolOptions::new()
-        .max_connections(12)
-        .acquire_timeout(Duration::from_secs(10))
-        .connect_with(options)
-        .await?)
-}
-
-/// Run this product's embedded SQLite migrations.
-///
-/// Deployment must create the database parent directory for the Sunshine
-/// Manager service account; the application creates the database file itself.
-pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
-    MIGRATOR.run(pool).await?;
-    Ok(())
-}
-
 pub async fn ready(pool: &SqlitePool) -> bool {
-    sqlx::query_scalar::<_, i64>(
-        r#"SELECT
-             (SELECT COUNT(*) FROM sqlite_master
-              WHERE type='table' AND name IN (
-                  'hosts','audit_logs','auth_users','auth_sessions','operations','audit_outbox'
-              )) = 6
-             AND
-             (SELECT COUNT(*) FROM pragma_table_info('operations')
-              WHERE name IN (
-                  'operation_id','actor','host_id','action','idempotency_key_hash',
-                  'request_fingerprint','request_ciphertext','state','attempt',
-                  'created_at_micros','updated_at_micros','started_at_micros',
-                  'completed_at_micros','error_code'
-              )) = 14
-             AND
-             (SELECT COUNT(*) FROM pragma_table_info('audit_outbox')
-              WHERE name IN (
-                  'outbox_id','operation_id','event_kind','action','target','actor',
-                  'detail','created_at_micros','delivered_at_micros','delivery_attempt'
-              )) = 10
-             AND
-             (SELECT COUNT(*) FROM pragma_table_info('audit_logs')
-              WHERE name='outbox_id') = 1
-             AND
-             (SELECT COUNT(*) FROM sqlite_master
-              WHERE type='index' AND name IN (
-                  'operations_idempotency_idx','audit_logs_outbox_id_idx',
-                  'audit_outbox_operation_event_idx'
-              )) = 3"#,
-    )
-    .fetch_one(pool)
-    .await
-    .map(|ready| ready != 0)
-    .unwrap_or(false)
+    crate::database_schema::is_current(pool).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -710,20 +647,23 @@ pub(crate) fn now_micros() -> anyhow::Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
-    async fn migrated_pool() -> SqlitePool {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn current_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        migrate(&pool).await.unwrap();
+        initialize_empty(&pool).await.unwrap();
         pool
     }
 
     #[tokio::test]
     async fn host_crud_matches_the_sqlite_schema() {
-        let pool = migrated_pool().await;
+        let pool = current_pool().await;
         let secrets = SecretBox::new("test", [7; 32]).unwrap();
 
         let created = insert_host(
@@ -803,7 +743,7 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_requires_the_operation_and_outbox_schema() {
-        let pool = migrated_pool().await;
+        let pool = current_pool().await;
         assert!(ready(&pool).await);
         sqlx::query("DROP TABLE audit_outbox")
             .execute(&pool)
@@ -814,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn doctor_checks_writes_and_encryption_without_retaining_probe_rows() {
-        let pool = migrated_pool().await;
+        let pool = current_pool().await;
         let secrets = SecretBox::new("doctor", [17; 32]).unwrap();
         insert_host(
             &pool,
@@ -860,8 +800,7 @@ mod tests {
         let database_url = format!("sqlite://{}", database_path.display());
         let secrets = SecretBox::new("test", [9; 32]).unwrap();
 
-        let pool = connect(&database_url).await.unwrap();
-        migrate(&pool).await.unwrap();
+        let pool = open_or_initialize(&database_url).await.unwrap();
 
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&pool)
@@ -903,8 +842,7 @@ mod tests {
         .unwrap();
         pool.close().await;
 
-        let reopened = connect(&database_url).await.unwrap();
-        migrate(&reopened).await.unwrap();
+        let reopened = open_existing(&database_url).await.unwrap();
         assert_eq!(
             get_host(&reopened, &secrets, &created.id).await.unwrap(),
             created
@@ -925,7 +863,7 @@ mod tests {
 
     #[tokio::test]
     async fn password_reset_invalidates_existing_database_sessions() {
-        let pool = migrated_pool().await;
+        let pool = current_pool().await;
         ensure_admin_user(
             &pool,
             "admin@example.com",

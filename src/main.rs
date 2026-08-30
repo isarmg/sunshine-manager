@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use sunshine_manager::{
-    ServeConfig, backup, db,
+    ServeConfig, db,
     http::{WorkerState, probe_loop, router},
     runtime_lock::{ApplicationLock, MaintenanceLock},
 };
@@ -20,20 +20,12 @@ struct Cli {
 enum Command {
     /// Serve the private loopback API (the default command).
     Serve,
-    /// Apply the product-owned SQLite migrations.
-    Migrate(DatabaseArgs),
     /// Create the initial local administrator.
     AdminCreate(DatabaseArgs),
     /// Reset an existing local administrator password.
     AdminResetPassword(AdminResetPasswordArgs),
     /// Run a deployment health check against the configured instance.
     Doctor,
-    /// Create a verified online SQLite backup without overwriting a file.
-    BackupCreate(BackupArgs),
-    /// Verify SQLite integrity, foreign keys and the product schema.
-    BackupVerify(BackupArgs),
-    /// Atomically restore a verified SQLite backup while the service is stopped.
-    Restore(RestoreArgs),
 }
 
 #[derive(clap::Args)]
@@ -52,22 +44,6 @@ struct AdminResetPasswordArgs {
     password: String,
 }
 
-#[derive(clap::Args)]
-struct BackupArgs {
-    #[arg(long, hide_env_values = true)]
-    database_url: String,
-    #[arg(long)]
-    output: std::path::PathBuf,
-}
-
-#[derive(clap::Args)]
-struct RestoreArgs {
-    #[arg(long, hide_env_values = true)]
-    database_url: String,
-    #[arg(long)]
-    input: std::path::PathBuf,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -78,17 +54,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
-        Command::Migrate(args) => {
-            let _maintenance = MaintenanceLock::exclusive(&args.database_url)?;
-            let pool = db::connect(&args.database_url).await?;
-            db::migrate(&pool).await?;
-            println!("{{\"status\":\"migrated\",\"schema\":\"sunshine\"}}");
-            Ok(())
-        }
         Command::AdminCreate(args) => {
             let _maintenance = MaintenanceLock::exclusive(&args.database_url)?;
-            let pool = db::connect(&args.database_url).await?;
-            db::migrate(&pool).await?;
+            let pool = db::open_or_initialize(&args.database_url).await?;
             let email = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL")
                 .unwrap_or_else(|_| "admin@example.com".to_string());
             let password = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD").ok();
@@ -98,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::AdminResetPassword(args) => {
             let _maintenance = MaintenanceLock::exclusive(&args.database_url)?;
-            let pool = db::connect(&args.database_url).await?;
+            let pool = db::open_existing(&args.database_url).await?;
             db::reset_admin_password(&pool, &args.email, &args.password).await?;
             println!(
                 "{{\"status\":\"password-reset\",\"email\":{:?}}}",
@@ -106,31 +74,10 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Command::BackupCreate(args) => {
-            backup::create(&args.database_url, &args.output)?;
-            println!(
-                "{{\"status\":\"backup-created\",\"output\":{:?}}}",
-                args.output
-            );
-            Ok(())
-        }
-        Command::BackupVerify(args) => {
-            backup::verify(&args.output)?;
-            println!(
-                "{{\"status\":\"backup-verified\",\"output\":{:?}}}",
-                args.output
-            );
-            Ok(())
-        }
-        Command::Restore(args) => {
-            backup::restore(&args.database_url, &args.input)?;
-            println!("{{\"status\":\"restored\",\"input\":{:?}}}", args.input);
-            Ok(())
-        }
         Command::Doctor => {
             let config = ServeConfig::from_runtime()?;
             let _maintenance = MaintenanceLock::shared(&config.database_url)?;
-            let pool = db::connect(&config.database_url).await?;
+            let pool = db::open_existing(&config.database_url).await?;
             let report = db::doctor(&pool, &config.secrets).await;
             println!(
                 "{{\"status\":\"{}\",\"bind\":\"{}\",\"schema_ready\":{},\
@@ -155,11 +102,10 @@ async fn main() -> anyhow::Result<()> {
 async fn serve() -> anyhow::Result<()> {
     let config = ServeConfig::from_runtime()?;
     // Hold both locks for the complete process lifetime. The instance lock
-    // rejects a second worker, while the shared maintenance lock still permits
-    // an online backup and excludes restore/migration/password maintenance.
+    // rejects a second worker, while the shared maintenance lock excludes
+    // external restore, upgrade, and administrator maintenance.
     let _application_lock = ApplicationLock::acquire(&config.database_url)?;
-    let pool = db::connect(&config.database_url).await?;
-    db::migrate(&pool).await?;
+    let pool = db::open_or_initialize(&config.database_url).await?;
     db::ensure_admin_user(
         &pool,
         &config.bootstrap_admin_email,
