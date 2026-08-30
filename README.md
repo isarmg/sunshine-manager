@@ -37,3 +37,11 @@ stored in the product's SQLite database. Mutating requests require the session-b
 `X-CSRF-Token` returned by login or the session endpoint and a matching `Origin`/`Host`.
 Login requests have bounded bodies, per-source and per-account budgets, a bounded global
 Argon2 concurrency gate, and the same password-hash work for unknown and known users.
+
+## Backup and restore
+
+`backup-create` uses SQLite's online backup API, refuses to overwrite an existing output,
+and verifies integrity, foreign keys and the product schema before reporting success.
+`backup-verify` performs the same read-only checks. Stop the service before `restore`; the
+command first validates and reconstructs the backup beside the destination, then atomically
+replaces the database and verifies the restored file.

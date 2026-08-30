@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use sunshine_manager::{
-    ServeConfig, db,
+    ServeConfig, backup, db,
     http::{WorkerState, probe_loop, router},
 };
 
@@ -19,7 +19,7 @@ struct Cli {
 enum Command {
     /// Serve the private loopback API (the default command).
     Serve,
-    /// Apply the module-owned PostgreSQL migrations.
+    /// Apply the product-owned SQLite migrations.
     Migrate(DatabaseArgs),
     /// Create the initial local administrator.
     AdminCreate(DatabaseArgs),
@@ -27,11 +27,11 @@ enum Command {
     AdminResetPassword(AdminResetPasswordArgs),
     /// Run a deployment health check against the configured instance.
     Doctor,
-    /// Create a PostgreSQL dump backup.
+    /// Create a verified online SQLite backup without overwriting a file.
     BackupCreate(BackupArgs),
-    /// Verify a PostgreSQL dump backup file.
+    /// Verify SQLite integrity, foreign keys and the product schema.
     BackupVerify(BackupArgs),
-    /// Restore a PostgreSQL dump backup.
+    /// Atomically restore a verified SQLite backup while the service is stopped.
     Restore(RestoreArgs),
 }
 
@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::BackupCreate(args) => {
-            create_sqlite_backup(&args.database_url, &args.output)?;
+            backup::create(&args.database_url, &args.output)?;
             println!(
                 "{{\"status\":\"backup-created\",\"output\":{:?}}}",
                 args.output
@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::BackupVerify(args) => {
-            verify_sqlite_backup(&args.output)?;
+            backup::verify(&args.output)?;
             println!(
                 "{{\"status\":\"backup-verified\",\"output\":{:?}}}",
                 args.output
@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Restore(args) => {
-            restore_sqlite_backup(&args.database_url, &args.input)?;
+            backup::restore(&args.database_url, &args.input)?;
             println!("{{\"status\":\"restored\",\"input\":{:?}}}", args.input);
             Ok(())
         }
@@ -138,43 +138,6 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
-}
-
-fn create_sqlite_backup(database_url: &str, output: &std::path::Path) -> anyhow::Result<()> {
-    let database = database_url
-        .strip_prefix("sqlite://")
-        .unwrap_or(database_url);
-    let status = std::process::Command::new("sqlite3")
-        .arg(database)
-        .arg(".backup")
-        .arg(output)
-        .status()?;
-    anyhow::ensure!(status.success(), "sqlite3 backup failed");
-    Ok(())
-}
-
-fn verify_sqlite_backup(output: &std::path::Path) -> anyhow::Result<()> {
-    anyhow::ensure!(output.is_file(), "backup file does not exist");
-    let status = std::process::Command::new("sqlite3")
-        .arg(output)
-        .arg("PRAGMA integrity_check;")
-        .status()?;
-    anyhow::ensure!(status.success(), "SQLite integrity check failed");
-    Ok(())
-}
-
-fn restore_sqlite_backup(database_url: &str, input: &std::path::Path) -> anyhow::Result<()> {
-    anyhow::ensure!(input.is_file(), "restore file does not exist");
-    let database = database_url
-        .strip_prefix("sqlite://")
-        .unwrap_or(database_url);
-    let status = std::process::Command::new("sqlite3")
-        .arg(database)
-        .arg(".restore")
-        .arg(input)
-        .status()?;
-    anyhow::ensure!(status.success(), "sqlite3 restore failed");
-    Ok(())
 }
 
 async fn serve() -> anyhow::Result<()> {
