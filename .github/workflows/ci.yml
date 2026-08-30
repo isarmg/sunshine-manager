@@ -37,11 +37,11 @@ jobs:
         with:
           node-version: 26.7.0
           check-latest: false
-      - name: Install module frontend dependencies
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend dependencies
         working-directory: web
-        run: npm install
-      - name: Build and test the dynamic frontend
+        run: npm ci
+      - name: Build the standalone frontend
         working-directory: web
-        run: npm run build
-      - name: Verify standalone web build
         run: npm run build
