@@ -1,6 +1,13 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    str::FromStr,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use sqlx::{Sqlite, SqlitePool, Transaction, migrate::Migrator, sqlite::SqlitePoolOptions};
+use sqlx::{
+    Sqlite, SqlitePool, Transaction,
+    migrate::Migrator,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+};
 
 use crate::{
     crypto::SecretBox,
@@ -26,10 +33,16 @@ pub(crate) struct StoredHost {
 }
 
 pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
+    let options = SqliteConnectOptions::from_str(database_url)?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5))
+        .synchronous(SqliteSynchronous::Full);
     Ok(SqlitePoolOptions::new()
         .max_connections(12)
         .acquire_timeout(Duration::from_secs(10))
-        .connect(database_url)
+        .connect_with(options)
         .await?)
 }
 
@@ -526,5 +539,75 @@ mod tests {
             get_host(&pool, &secrets, &created.id).await,
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn production_pool_is_durable_and_enforces_sqlite_safety_pragmas() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("sunshine.sqlite3");
+        let database_url = format!("sqlite://{}", database_path.display());
+        let secrets = SecretBox::new("test", [9; 32]).unwrap();
+
+        let pool = connect(&database_url).await.unwrap();
+        migrate(&pool).await.unwrap();
+
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(journal_mode, "wal");
+        assert_eq!(busy_timeout, 5_000);
+        assert_eq!(synchronous, 2);
+
+        let created = insert_host(
+            &pool,
+            &secrets,
+            HostSaveRequest {
+                name: "Persistent".into(),
+                host: "192.0.2.30".into(),
+                web_port: 47_990,
+                username: "sunshine".into(),
+                password: Some("persistent-secret".into()),
+                verify_tls: false,
+            },
+            false,
+            "test-user",
+        )
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let reopened = connect(&database_url).await.unwrap();
+        migrate(&reopened).await.unwrap();
+        assert_eq!(
+            get_host(&reopened, &secrets, &created.id).await.unwrap(),
+            created
+        );
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&reopened)
+            .await
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        assert!(
+            sqlx::query("PRAGMA foreign_key_check")
+                .fetch_all(&reopened)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
