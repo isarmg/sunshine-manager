@@ -10,6 +10,7 @@ use sqlx::{
 };
 
 use crate::{
+    auth::{InternalAuth, IssuedSession},
     crypto::SecretBox,
     error::{AppError, AppResult},
     model::{Host, HostPatchRequest, HostSaveRequest, normalize_host, validate_host_request},
@@ -55,11 +56,11 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
 
 pub async fn ready(pool: &SqlitePool) -> bool {
     sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('hosts','audit_logs','auth_users')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('hosts','audit_logs','auth_users','auth_sessions')",
     )
     .fetch_one(pool)
     .await
-    .map(|count| count == 3)
+    .map(|count| count == 4)
     .unwrap_or(false)
 }
 
@@ -70,6 +71,7 @@ pub struct StoredUser {
     pub email: String,
     pub password_hash: String,
     pub active: bool,
+    pub session_version: i64,
 }
 
 pub async fn find_active_user_by_email(
@@ -78,7 +80,7 @@ pub async fn find_active_user_by_email(
 ) -> AppResult<Option<StoredUser>> {
     let normalized = email.trim().to_lowercase();
     let row = sqlx::query_as::<_, StoredUser>(
-        "SELECT user_id,email,password_hash,active FROM auth_users \
+        "SELECT user_id,email,password_hash,active,session_version FROM auth_users \
          WHERE email=? AND active=true",
     )
     .bind(normalized)
@@ -123,16 +125,148 @@ pub async fn reset_admin_password(pool: &SqlitePool, email: &str, password: &str
     let normalized = email.trim().to_lowercase();
     let password_hash = crate::auth::hash_password(password)
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    let result = sqlx::query("UPDATE auth_users SET password_hash=? WHERE email=?")
-        .bind(password_hash)
-        .bind(normalized)
-        .execute(pool)
-        .await?;
+    let now = now_micros()?;
+    let mut transaction = pool.begin().await?;
+    let result = sqlx::query(
+        "UPDATE auth_users \
+         SET password_hash=?, session_version=session_version+1 \
+         WHERE email=?",
+    )
+    .bind(password_hash)
+    .bind(normalized)
+    .execute(&mut *transaction)
+    .await?;
     if result.rows_affected() != 1 {
         return Err(AppError::NotFound(format!(
             "no active or existing user matched {email}"
         )));
     }
+    sqlx::query(
+        "UPDATE auth_sessions SET revoked_at_micros=? \
+         WHERE user_id=(SELECT user_id FROM auth_users WHERE email=?) \
+           AND revoked_at_micros IS NULL",
+    )
+    .bind(now)
+    .bind(email.trim().to_lowercase())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StoredSession {
+    pub session_id: String,
+    pub user_id: String,
+    pub email: String,
+    pub csrf_hash: Vec<u8>,
+    pub absolute_expires_at_micros: i64,
+}
+
+pub async fn create_session(
+    pool: &SqlitePool,
+    user: &StoredUser,
+    session: &IssuedSession,
+    now_micros: i64,
+) -> AppResult<()> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM auth_sessions \
+         WHERE revoked_at_micros IS NOT NULL \
+            OR idle_expires_at_micros<=? \
+            OR absolute_expires_at_micros<=?",
+    )
+    .bind(now_micros)
+    .bind(now_micros)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM auth_sessions \
+         WHERE user_id=? AND session_id IN ( \
+             SELECT session_id FROM auth_sessions WHERE user_id=? \
+             ORDER BY created_at_micros DESC,session_id DESC LIMIT -1 OFFSET 31 \
+         )",
+    )
+    .bind(&user.user_id)
+    .bind(&user.user_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO auth_sessions(
+               session_id,user_id,token_hash,csrf_hash,user_session_version,
+               created_at_micros,last_seen_at_micros,idle_expires_at_micros,
+               absolute_expires_at_micros
+           ) VALUES(?,?,?,?,?,?,?,?,?)"#,
+    )
+    .bind(&session.session_id)
+    .bind(&user.user_id)
+    .bind(&session.token_hash)
+    .bind(&session.csrf_hash)
+    .bind(user.session_version)
+    .bind(now_micros)
+    .bind(now_micros)
+    .bind(session.idle_expires_at_micros)
+    .bind(session.absolute_expires_at_micros)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn authenticate_session(
+    pool: &SqlitePool,
+    auth: &InternalAuth,
+    token_hash: &[u8],
+    now_micros: i64,
+) -> AppResult<Option<StoredSession>> {
+    let session = sqlx::query_as::<_, StoredSession>(
+        r#"SELECT s.session_id,s.user_id,u.email,s.csrf_hash,s.absolute_expires_at_micros
+           FROM auth_sessions s
+           JOIN auth_users u ON u.user_id=s.user_id
+           WHERE s.token_hash=?
+             AND s.revoked_at_micros IS NULL
+             AND s.idle_expires_at_micros>?
+             AND s.absolute_expires_at_micros>?
+             AND u.active=true
+             AND u.session_version=s.user_session_version"#,
+    )
+    .bind(token_hash)
+    .bind(now_micros)
+    .bind(now_micros)
+    .fetch_optional(pool)
+    .await?;
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let idle_expires_at_micros =
+        auth.refreshed_idle_expiry(now_micros, session.absolute_expires_at_micros)?;
+    let updated = sqlx::query(
+        r#"UPDATE auth_sessions
+           SET last_seen_at_micros=?,idle_expires_at_micros=?
+           WHERE session_id=?
+             AND revoked_at_micros IS NULL
+             AND idle_expires_at_micros>?
+             AND absolute_expires_at_micros>?"#,
+    )
+    .bind(now_micros)
+    .bind(idle_expires_at_micros)
+    .bind(&session.session_id)
+    .bind(now_micros)
+    .bind(now_micros)
+    .execute(pool)
+    .await?;
+    Ok((updated.rows_affected() == 1).then_some(session))
+}
+
+pub async fn revoke_session(pool: &SqlitePool, session_id: &str, now_micros: i64) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE auth_sessions SET revoked_at_micros=? \
+         WHERE session_id=? AND revoked_at_micros IS NULL",
+    )
+    .bind(now_micros)
+    .bind(session_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -609,5 +743,53 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn password_reset_invalidates_existing_database_sessions() {
+        let pool = migrated_pool().await;
+        ensure_admin_user(
+            &pool,
+            "admin@example.com",
+            Some("correct horse battery staple"),
+        )
+        .await
+        .unwrap();
+        let user = find_active_user_by_email(&pool, "admin@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        let auth =
+            InternalAuth::new(Duration::from_secs(3_600), Duration::from_secs(600), false).unwrap();
+        let now = now_micros().unwrap();
+        let issued = auth.issue(now).unwrap();
+        create_session(&pool, &user, &issued, now).await.unwrap();
+        assert!(
+            authenticate_session(&pool, &auth, &issued.token_hash, now)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        reset_admin_password(
+            &pool,
+            "admin@example.com",
+            "another correct horse battery staple",
+        )
+        .await
+        .unwrap();
+        assert!(
+            authenticate_session(&pool, &auth, &issued.token_hash, now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let revoked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auth_sessions WHERE revoked_at_micros IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(revoked, 1);
     }
 }

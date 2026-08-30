@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { login, logout, requestJson } from "./api";
+import { login, logout, requestJson, restoreSession } from "./api";
 
 type Host = Record<string, unknown>;
 
@@ -9,6 +9,14 @@ export default function App() {
   const [email, setEmail] = useState("admin@example.com");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [sessionChecked, setSessionChecked] = useState(false);
+
+  useEffect(() => {
+    restoreSession()
+      .then(() => setAuthenticated(true))
+      .catch(() => setAuthenticated(false))
+      .finally(() => setSessionChecked(true));
+  }, []);
 
   useEffect(() => {
     if (authenticated) {
@@ -34,6 +42,10 @@ export default function App() {
     setAuthenticated(false);
     setHosts([]);
   };
+
+  if (!sessionChecked) {
+    return <main>正在检查会话…</main>;
+  }
 
   if (!authenticated) {
     return (

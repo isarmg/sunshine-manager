@@ -24,20 +24,33 @@ impl ServeConfig {
         }
 
         let credential_key = decode_key(&required("SUNSHINE_MANAGER_CREDENTIAL_KEY")?)?;
-        let session_secret = STANDARD
-            .decode(required("SUNSHINE_MANAGER_SESSION_SECRET")?)
-            .context("SUNSHINE_MANAGER_SESSION_SECRET must be base64")?;
-        let session_ttl =
+        let bind: SocketAddr = value("SUNSHINE_MANAGER_BIND", "127.0.0.1:18104")
+            .parse()
+            .context("SUNSHINE_MANAGER_BIND must be a socket address")?;
+        let production = parse_bool("SUNSHINE_MANAGER_PRODUCTION", true)?;
+        let session_absolute_ttl =
             Duration::from_secs(parse_u64("SUNSHINE_MANAGER_SESSION_TTL_SECONDS", 43_200)?);
-        let cookie_secure = parse_bool("SUNSHINE_MANAGER_SESSION_COOKIE_SECURE", false)?;
+        let session_idle_ttl = Duration::from_secs(parse_u64(
+            "SUNSHINE_MANAGER_SESSION_IDLE_TTL_SECONDS",
+            1_800,
+        )?);
+        let cookie_secure = parse_bool("SUNSHINE_MANAGER_SESSION_COOKIE_SECURE", production)?;
+        if production && !cookie_secure {
+            anyhow::bail!("production requires Secure session cookies");
+        }
+        if !cookie_secure && !bind.ip().is_loopback() {
+            anyhow::bail!("insecure development cookies require a loopback bind address");
+        }
 
         Ok(Self {
-            bind: value("SUNSHINE_MANAGER_BIND", "127.0.0.1:18104")
-                .parse()
-                .context("SUNSHINE_MANAGER_BIND must be a socket address")?,
+            bind,
             database_url,
-            production: parse_bool("SUNSHINE_MANAGER_PRODUCTION", true)?,
-            internal_auth: InternalAuth::new(session_secret, session_ttl, cookie_secure)?,
+            production,
+            internal_auth: InternalAuth::new(
+                session_absolute_ttl,
+                session_idle_ttl,
+                cookie_secure,
+            )?,
             secrets: SecretBox::new(
                 value("SUNSHINE_MANAGER_CREDENTIAL_KEY_ID", "primary"),
                 credential_key,

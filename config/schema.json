@@ -9,6 +9,10 @@
     "database_url": { "type": "string", "minLength": 1 },
     "credential_key": { "type": "string", "minLength": 43 },
     "credential_key_id": { "type": "string", "minLength": 1, "default": "primary" },
+    "bind": { "type": "string", "default": "127.0.0.1:18104" },
+    "session_ttl_seconds": { "type": "integer", "minimum": 1, "default": 43200 },
+    "session_idle_ttl_seconds": { "type": "integer", "minimum": 1, "default": 1800 },
+    "session_cookie_secure": { "type": "boolean", "default": true },
     "production": { "type": "boolean", "default": true }
   }
 }
