@@ -20,6 +20,8 @@ pub enum AppError {
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("too many requests; retry after {retry_after} seconds")]
+    TooManyRequests { retry_after: u64 },
     #[error("{0}")]
     Upstream(String),
     #[error("database unavailable")]
@@ -44,6 +46,7 @@ impl AppError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Crypto | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -57,6 +60,7 @@ impl AppError {
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
+            Self::TooManyRequests { .. } => "too_many_requests",
             Self::Upstream(_) => "upstream_error",
             Self::Database(_) => "database_unavailable",
             Self::Crypto => "crypto_error",
@@ -80,6 +84,9 @@ impl IntoResponse for AppError {
             | Self::NotFound(message)
             | Self::Conflict(message)
             | Self::Upstream(message) => message.clone(),
+            Self::TooManyRequests { retry_after } => {
+                format!("too many login attempts; retry after {retry_after} seconds")
+            }
             Self::Unauthorized => "unauthorized".to_string(),
             Self::Database(_) => "database unavailable".to_string(),
             Self::Crypto | Self::Internal(_) => "internal error".to_string(),
@@ -87,13 +94,33 @@ impl IntoResponse for AppError {
         if status.is_server_error() {
             tracing::error!(error = %self, "Sunshine worker request failed");
         }
-        (
+        let mut response = (
             status,
             Json(ErrorBody {
                 code: self.code(),
                 message,
             }),
         )
-            .into_response()
+            .into_response();
+        if let Self::TooManyRequests { retry_after } = self
+            && let Ok(value) = retry_after.to_string().parse()
+        {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_response_has_retry_after() {
+        let response = AppError::TooManyRequests { retry_after: 17 }.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "17");
     }
 }

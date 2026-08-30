@@ -1,8 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Extension, Path, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -33,6 +33,8 @@ pub struct WorkerState {
     pub production: bool,
     upstream: UpstreamClient,
     health: Arc<RwLock<HashMap<String, HealthSnapshot>>>,
+    login_admission: crate::login_admission::LoginAdmission,
+    dummy_password_hash: Arc<String>,
 }
 
 impl WorkerState {
@@ -42,6 +44,9 @@ impl WorkerState {
         auth: InternalAuth,
         production: bool,
     ) -> anyhow::Result<Self> {
+        let dummy_password_hash =
+            crate::auth::hash_password("sunshine-dummy-password-value-that-is-never-accepted")
+                .map_err(|error| anyhow::anyhow!(error))?;
         Ok(Self {
             pool,
             secrets,
@@ -49,6 +54,8 @@ impl WorkerState {
             production,
             upstream: UpstreamClient::new()?,
             health: Arc::new(RwLock::new(HashMap::new())),
+            login_admission: crate::login_admission::LoginAdmission::default(),
+            dummy_password_hash: Arc::new(dummy_password_hash),
         })
     }
 }
@@ -57,7 +64,8 @@ pub fn router(state: WorkerState) -> Router {
     let public = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .route("/api/v1/auth/login", post(login));
+        .route("/api/v1/auth/login", post(login))
+        .layer(DefaultBodyLimit::max(16 * 1024));
 
     let protected = Router::new()
         .route("/api/v1/auth/logout", post(logout))
@@ -197,14 +205,33 @@ struct LoginRequest {
 
 async fn login(
     State(state): State<WorkerState>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
     Json(request): Json<LoginRequest>,
 ) -> AppResult<Response> {
-    let user = db::find_active_user_by_email(&state.pool, &request.email)
-        .await?
-        .ok_or(AppError::Unauthorized)?;
-    if !crate::auth::verify_password(&request.password, &user.password_hash) {
+    let normalized_email = request.email.trim().to_lowercase();
+    state
+        .login_admission
+        .admit(Some(source.ip()), &normalized_email)
+        .await?;
+    let user = db::find_active_user_by_email(&state.pool, &normalized_email).await?;
+    let password_hash = user
+        .as_ref()
+        .map(|user| user.password_hash.clone())
+        .unwrap_or_else(|| (*state.dummy_password_hash).clone());
+    let password = request.password;
+    let permit = state.login_admission.argon2_permit().await?;
+    let verified = tokio::task::spawn_blocking(move || {
+        crate::auth::verify_password(&password, &password_hash)
+    })
+    .await
+    .map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("password verification failed: {error}"))
+    })?;
+    drop(permit);
+    let Some(user) = user.filter(|_| verified) else {
         return Err(AppError::Unauthorized);
-    }
+    };
+    state.login_admission.clear_account(&normalized_email).await;
     let now = db::now_micros()?;
     let session = state.auth.issue(now)?;
     db::create_session(&state.pool, &user, &session, now).await?;
@@ -865,7 +892,10 @@ mod tests {
             true,
         )
         .unwrap();
-        router(state)
+        router(state).layer(Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            42_000,
+        )))))
     }
 
     #[tokio::test]
@@ -910,6 +940,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_body_is_bounded_before_password_work() {
+        let oversized = serde_json::json!({
+            "email": "admin@example.com",
+            "password": "x".repeat(20 * 1024)
+        })
+        .to_string();
+        let response = test_router()
+            .await
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
     async fn database_session_requires_csrf_and_logout_revokes_it() {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -936,7 +986,10 @@ mod tests {
             false,
         )
         .unwrap();
-        let application = router(state);
+        let application = router(state).layer(Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            42_000,
+        )))));
 
         let login = application
             .clone()

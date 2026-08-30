@@ -14,6 +14,7 @@ pub mod domain;
 pub mod error;
 pub mod http;
 pub mod infrastructure;
+pub mod login_admission;
 pub mod model;
 pub mod operations;
 

@@ -196,9 +196,12 @@ async fn serve() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     tracing::info!(bind = %config.bind, schema = db::SCHEMA, "Sunshine manager ready");
     let probe = tokio::spawn(probe_loop(state.clone()));
-    let result = axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown())
-        .await;
+    let result = axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await;
     probe.abort();
     result?;
     Ok(())
