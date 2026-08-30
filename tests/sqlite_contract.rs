@@ -1,4 +1,9 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
 use sha2::Digest;
 use sunshine_manager::{database_schema, db};
@@ -7,22 +12,39 @@ fn database_url(path: &Path) -> String {
     format!("sqlite://{}", path.display())
 }
 
-fn directory_snapshot(directory: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut files = fs::read_dir(directory)
-        .unwrap()
+fn try_directory_snapshot(directory: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+    let mut files = fs::read_dir(directory)?
         .map(|entry| {
-            let entry = entry.unwrap();
+            let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            let bytes = if entry.file_type().unwrap().is_file() {
-                fs::read(entry.path()).unwrap()
+            let bytes = if entry.file_type()?.is_file() {
+                fs::read(entry.path())?
             } else {
                 Vec::new()
             };
-            (name, bytes)
+            Ok((name, bytes))
         })
-        .collect::<Vec<_>>();
+        .collect::<std::io::Result<Vec<_>>>()?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    files
+    Ok(files)
+}
+
+fn stable_directory_snapshot(directory: &Path) -> Vec<(String, Vec<u8>)> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut previous = None;
+    loop {
+        match try_directory_snapshot(directory) {
+            Ok(current) if previous.as_ref() == Some(&current) => return current,
+            Ok(current) => previous = Some(current),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => previous = None,
+            Err(error) => panic!("snapshot {}: {error}", directory.display()),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "SQLite directory did not reach a stable state before snapshot"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn assert_snapshot_unchanged(before: &[(String, Vec<u8>)], after: &[(String, Vec<u8>)]) {
@@ -112,19 +134,19 @@ async fn existing_empty_legacy_wrong_version_and_drift_are_read_only_rejections(
 
     let empty = directory.path().join("empty.sqlite3");
     fs::File::create(&empty).unwrap();
-    let before = directory_snapshot(directory.path());
+    let before = stable_directory_snapshot(directory.path());
     assert!(db::open_or_initialize(&database_url(&empty)).await.is_err());
-    assert_snapshot_unchanged(&before, &directory_snapshot(directory.path()));
+    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
 
     let legacy = directory.path().join("legacy.sqlite3");
     mutate(&legacy, "CREATE TABLE legacy_data(id INTEGER PRIMARY KEY)");
-    let before = directory_snapshot(directory.path());
+    let before = stable_directory_snapshot(directory.path());
     assert!(
         db::open_or_initialize(&database_url(&legacy))
             .await
             .is_err()
     );
-    assert_snapshot_unchanged(&before, &directory_snapshot(directory.path()));
+    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
 
     let wrong_version = directory.path().join("wrong-version.sqlite3");
     let pool = db::open_or_initialize(&database_url(&wrong_version))
@@ -135,13 +157,13 @@ async fn existing_empty_legacy_wrong_version_and_drift_are_read_only_rejections(
         &wrong_version,
         "UPDATE product_metadata SET application_version='0.6.0'",
     );
-    let before = directory_snapshot(directory.path());
+    let before = stable_directory_snapshot(directory.path());
     assert!(
         db::open_or_initialize(&database_url(&wrong_version))
             .await
             .is_err()
     );
-    assert_snapshot_unchanged(&before, &directory_snapshot(directory.path()));
+    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
 
     let drifted = directory.path().join("drifted.sqlite3");
     let pool = db::open_or_initialize(&database_url(&drifted))
@@ -149,13 +171,13 @@ async fn existing_empty_legacy_wrong_version_and_drift_are_read_only_rejections(
         .unwrap();
     pool.close().await;
     mutate(&drifted, "CREATE TABLE unexpected(id INTEGER)");
-    let before = directory_snapshot(directory.path());
+    let before = stable_directory_snapshot(directory.path());
     assert!(
         db::open_or_initialize(&database_url(&drifted))
             .await
             .is_err()
     );
-    assert_snapshot_unchanged(&before, &directory_snapshot(directory.path()));
+    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
 }
 
 #[cfg(unix)]
@@ -172,18 +194,18 @@ async fn database_symlinks_and_hardlinks_are_rejected_without_mutation() {
 
     let symbolic = directory.path().join("symbolic.sqlite3");
     symlink(&original, &symbolic).unwrap();
-    let before = directory_snapshot(directory.path());
+    let before = stable_directory_snapshot(directory.path());
     assert!(
         db::open_or_initialize(&database_url(&symbolic))
             .await
             .is_err()
     );
-    assert_snapshot_unchanged(&before, &directory_snapshot(directory.path()));
+    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
 
     fs::remove_file(&symbolic).unwrap();
     let hard = directory.path().join("hard.sqlite3");
     fs::hard_link(&original, &hard).unwrap();
-    let before = directory_snapshot(directory.path());
+    let before = stable_directory_snapshot(directory.path());
     assert!(db::open_or_initialize(&database_url(&hard)).await.is_err());
-    assert_snapshot_unchanged(&before, &directory_snapshot(directory.path()));
+    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
 }
