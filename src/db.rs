@@ -187,8 +187,7 @@ pub async fn ensure_admin_user(
         )
     })?;
     let normalized = email.trim().to_lowercase();
-    let password_hash = crate::auth::hash_password(password)
-        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    let password_hash = crate::auth::hash_password(password)?;
     sqlx::query(
         "INSERT INTO auth_users(user_id,email,password_hash,active,created_at_micros) \
          VALUES(?,?,?,true,?)",
@@ -204,8 +203,7 @@ pub async fn ensure_admin_user(
 
 pub async fn reset_admin_password(pool: &SqlitePool, email: &str, password: &str) -> AppResult<()> {
     let normalized = email.trim().to_lowercase();
-    let password_hash = crate::auth::hash_password(password)
-        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    let password_hash = crate::auth::hash_password(password)?;
     let now = now_micros()?;
     let mut transaction = pool.begin().await?;
     let result = sqlx::query(

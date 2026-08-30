@@ -1,5 +1,9 @@
 use std::time::Duration;
 
+use argon2::{
+    Algorithm, Argon2, Params, Version,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt, SaltString},
+};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
@@ -10,6 +14,12 @@ const SECURE_SESSION_COOKIE: &str = "__Host-sunshine_session";
 const DEVELOPMENT_SESSION_COOKIE: &str = "sunshine_session";
 const SECURE_CSRF_COOKIE: &str = "__Host-sunshine_csrf";
 const DEVELOPMENT_CSRF_COOKIE: &str = "sunshine_csrf";
+const PASSWORD_MIN_BYTES: usize = 12;
+const PASSWORD_MAX_BYTES: usize = 1024;
+const ARGON2_MEMORY_KIB: u32 = 19_456;
+const ARGON2_ITERATIONS: u32 = 2;
+const ARGON2_LANES: u32 = 1;
+const ARGON2_OUTPUT_BYTES: usize = 32;
 
 #[derive(Clone)]
 pub struct InternalAuth {
@@ -131,7 +141,67 @@ pub struct InternalIdentity {
     pub csrf_hash: Vec<u8>,
 }
 
-pub use isarmg_auth::{hash_password, verify_password};
+pub fn hash_password(password: &str) -> AppResult<String> {
+    validate_password(password)?;
+    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+    current_argon2()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))
+}
+
+pub fn verify_password(password: &str, encoded: &str) -> bool {
+    if validate_password(password).is_err() {
+        return false;
+    }
+    let Ok(hash) = PasswordHash::new(encoded) else {
+        return false;
+    };
+    if hash.to_string() != encoded || !password_hash_uses_current_policy(&hash) {
+        return false;
+    }
+    current_argon2()
+        .verify_password(password.as_bytes(), &hash)
+        .is_ok()
+}
+
+fn validate_password(password: &str) -> AppResult<()> {
+    if !(PASSWORD_MIN_BYTES..=PASSWORD_MAX_BYTES).contains(&password.len()) {
+        return Err(AppError::BadRequest(format!(
+            "password must contain between {PASSWORD_MIN_BYTES} and {PASSWORD_MAX_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn current_argon2() -> Argon2<'static> {
+    let params = Params::new(
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_LANES,
+        Some(ARGON2_OUTPUT_BYTES),
+    )
+    .expect("compiled Argon2id policy is valid");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+fn password_hash_uses_current_policy(hash: &PasswordHash<'_>) -> bool {
+    let mut salt = [0_u8; Salt::MAX_LENGTH];
+    hash.algorithm.as_str() == "argon2id"
+        && hash.version == Some(Version::V0x13.into())
+        && hash.params.as_str() == "m=19456,t=2,p=1"
+        && hash.params.get_decimal("m") == Some(ARGON2_MEMORY_KIB)
+        && hash.params.get_decimal("t") == Some(ARGON2_ITERATIONS)
+        && hash.params.get_decimal("p") == Some(ARGON2_LANES)
+        && hash
+            .salt
+            .and_then(|value| value.decode_b64(&mut salt).ok())
+            .is_some_and(|decoded| decoded.len() == Salt::RECOMMENDED_LENGTH)
+        && hash
+            .hash
+            .as_ref()
+            .is_some_and(|output| output.len() == ARGON2_OUTPUT_BYTES)
+}
 
 pub fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
@@ -213,5 +283,59 @@ mod tests {
         );
         assert!(secure.session_cookie(&first.token).contains("; Secure"));
         assert!(!secure.csrf_cookie(&first.csrf_token).contains("HttpOnly"));
+    }
+
+    #[test]
+    fn passwords_use_only_the_exact_current_argon2id_policy() {
+        let password = "current-sunshine-password";
+        let encoded = hash_password(password).unwrap();
+        let parsed = PasswordHash::new(&encoded).unwrap();
+        assert!(password_hash_uses_current_policy(&parsed));
+        assert!(verify_password(password, &encoded));
+        assert!(!verify_password("wrong-current-password", &encoded));
+        let reordered = encoded.replace("m=19456,t=2,p=1", "m=19456,p=1,t=2");
+        assert!(!verify_password(password, &reordered));
+
+        let weaker = Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            Params::new(8_192, 1, 1, Some(ARGON2_OUTPUT_BYTES)).unwrap(),
+        )
+        .hash_password(
+            password.as_bytes(),
+            &SaltString::generate(&mut argon2::password_hash::rand_core::OsRng),
+        )
+        .unwrap()
+        .to_string();
+        assert!(!verify_password(password, &weaker));
+
+        let other_algorithm = Argon2::new(
+            Algorithm::Argon2i,
+            Version::V0x13,
+            Params::new(
+                ARGON2_MEMORY_KIB,
+                ARGON2_ITERATIONS,
+                ARGON2_LANES,
+                Some(ARGON2_OUTPUT_BYTES),
+            )
+            .unwrap(),
+        )
+        .hash_password(
+            password.as_bytes(),
+            &SaltString::generate(&mut argon2::password_hash::rand_core::OsRng),
+        )
+        .unwrap()
+        .to_string();
+        assert!(!verify_password(password, &other_algorithm));
+    }
+
+    #[test]
+    fn password_length_is_a_bounded_current_contract() {
+        assert!(hash_password(&"a".repeat(PASSWORD_MIN_BYTES - 1)).is_err());
+        assert!(hash_password(&"a".repeat(PASSWORD_MAX_BYTES + 1)).is_err());
+        assert!(!verify_password(
+            &"a".repeat(PASSWORD_MAX_BYTES + 1),
+            "not-a-hash"
+        ));
     }
 }

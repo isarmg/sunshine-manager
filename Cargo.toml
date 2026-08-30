@@ -17,7 +17,6 @@ axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
-isarmg-auth = "0.1.0"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rand = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
