@@ -24,6 +24,7 @@ SUNSHINE_MANAGER_SESSION_COOKIE_SECURE=true
 SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD=<initial admin password>
 SUNSHINE_MANAGER_COVER_URL_ALLOWLIST=covers.example.com,cdn.example.com
+SUNSHINE_MANAGER_COVER_PROXY_ORIGIN=https://sunshine-manager.internal:18104/
 ```
 
 Then:
@@ -136,8 +137,11 @@ and does not retain its write probe.
 
 Cover uploads accept HTTPS URLs only when their DNS host is listed exactly in
 `SUNSHINE_MANAGER_COVER_URL_ALLOWLIST` and every address currently returned by DNS is public.
-The policy is checked before creating a new operation and checked again immediately before
-the background worker asks Sunshine to fetch the URL; an idempotent replay is resolved before
-performing DNS again.
-The managed Sunshine machine resolves and fetches the URL itself, so its network must also enforce
-an outbound allowlist that blocks private, link-local and metadata networks and unsafe redirects.
+Immediately before execution, Manager resolves the name once, pins the request to that complete
+public address set, disables redirects, limits the body to 8 MiB, and accepts only the supported
+image media types. Sunshine receives only a one-time internal URL bound to the Host ID, Operation
+ID, resolved Sunshine source address, and a 30-second lifetime; it never receives or resolves the
+original external URL. `SUNSHINE_MANAGER_COVER_PROXY_ORIGIN` is therefore required whenever the
+allowlist is non-empty. It must be an HTTPS origin reachable directly from managed Sunshine hosts;
+do not route this one-time path through a public reverse proxy because authorization uses the
+transport peer address and ignores forwarded headers.

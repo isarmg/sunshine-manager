@@ -7,6 +7,7 @@ pub mod auth;
 pub mod client;
 pub mod config;
 pub mod cover_policy;
+pub mod cover_proxy;
 pub mod crypto;
 pub mod database_schema;
 pub mod db;

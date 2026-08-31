@@ -17,6 +17,7 @@ use crate::{
     InternalAuth, InternalIdentity,
     client::UpstreamClient,
     cover_policy::CoverUrlPolicy,
+    cover_proxy::CoverProxy,
     crypto::SecretBox,
     db,
     error::{AppError, AppResult},
@@ -42,6 +43,7 @@ pub struct WorkerState {
     health: Arc<RwLock<HashMap<String, HealthSnapshot>>>,
     operations: OperationManager,
     cover_url_policy: CoverUrlPolicy,
+    cover_proxy: CoverProxy,
     login_admission: crate::login_admission::LoginAdmission,
     dummy_password_hash: Arc<String>,
     static_dir: PathBuf,
@@ -76,6 +78,7 @@ impl WorkerState {
             health: Arc::new(RwLock::new(HashMap::new())),
             operations,
             cover_url_policy: CoverUrlPolicy::default(),
+            cover_proxy: CoverProxy::disabled(),
             login_admission: crate::login_admission::LoginAdmission::default(),
             dummy_password_hash: Arc::new(dummy_password_hash),
             static_dir,
@@ -85,6 +88,15 @@ impl WorkerState {
     pub fn with_cover_url_policy(mut self, policy: CoverUrlPolicy) -> Self {
         self.operations = self.operations.with_cover_url_policy(policy.clone());
         self.cover_url_policy = policy;
+        self
+    }
+
+    pub fn with_cover_delivery(mut self, policy: CoverUrlPolicy, proxy: CoverProxy) -> Self {
+        self.operations = self
+            .operations
+            .with_cover_delivery(policy.clone(), proxy.clone());
+        self.cover_url_policy = policy;
+        self.cover_proxy = proxy;
         self
     }
 
@@ -100,6 +112,10 @@ pub fn router(state: WorkerState) -> Router {
 
     let public_api = Router::new()
         .route("/auth/login", post(login))
+        .route(
+            "/sunshine/internal/hosts/{host_id}/operations/{operation_id}/covers/{token}",
+            get(cover_delivery),
+        )
         .layer(DefaultBodyLimit::max(16 * 1024));
 
     let protected_api = Router::new()
@@ -706,6 +722,30 @@ async fn cover_upload(
     };
     state.cover_url_policy.validate(url).await?;
     enqueue_remote(&state, &identity, &id, &headers, request).await
+}
+
+async fn cover_delivery(
+    State(state): State<WorkerState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((host_id, operation_id, token)): Path<(String, String, String)>,
+) -> AppResult<Response> {
+    let cover = state
+        .cover_proxy
+        .take(&host_id, &operation_id, &token, peer.ip())?;
+    let mut response = cover.bytes.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(cover.content_type),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private, max-age=0"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline"),
+    );
+    Ok(response)
 }
 
 async fn operation_get(

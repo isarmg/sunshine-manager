@@ -159,7 +159,7 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
         config.production,
         config.static_dir,
     )?
-    .with_cover_url_policy(config.cover_url_policy);
+    .with_cover_delivery(config.cover_url_policy, config.cover_proxy);
     let recovered = state.operation_manager().recover_startup().await?;
     if let Err(error) = state.operation_manager().deliver_outbox().await {
         tracing::warn!(%error, "initial audit outbox delivery failed; background retry will continue");

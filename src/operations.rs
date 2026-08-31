@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::{
     client::UpstreamClient,
     cover_policy::CoverUrlPolicy,
+    cover_proxy::CoverProxy,
     crypto::SecretBox,
     db,
     error::{AppError, AppResult},
@@ -162,6 +163,7 @@ pub struct OperationManager {
     executor: Arc<dyn RemoteOperationExecutor>,
     notify: Arc<Notify>,
     cover_url_policy: CoverUrlPolicy,
+    cover_proxy: CoverProxy,
 }
 
 impl OperationManager {
@@ -182,11 +184,18 @@ impl OperationManager {
             }),
             notify: Arc::new(Notify::new()),
             cover_url_policy: CoverUrlPolicy::default(),
+            cover_proxy: CoverProxy::disabled(),
         }
     }
 
     pub fn with_cover_url_policy(mut self, policy: CoverUrlPolicy) -> Self {
         self.cover_url_policy = policy;
+        self
+    }
+
+    pub fn with_cover_delivery(mut self, policy: CoverUrlPolicy, proxy: CoverProxy) -> Self {
+        self.cover_url_policy = policy;
+        self.cover_proxy = proxy;
         self
     }
 
@@ -646,10 +655,19 @@ impl OperationManager {
             return ExecutionOutcome::Failed("tls_verification_required");
         }
         if let RemoteOperationRequest::CoverUpload { url, .. } = &mut request {
-            match self.cover_url_policy.validate(url).await {
-                Ok(validated) => *url = validated,
-                Err(_) => return ExecutionOutcome::Failed("cover_url_rejected"),
-            }
+            let cover = match self.cover_url_policy.download(url).await {
+                Ok(cover) => cover,
+                Err(_) => return ExecutionOutcome::Failed("cover_download_rejected"),
+            };
+            let delivery = match self
+                .cover_proxy
+                .publish(&host, &operation.operation_id, cover)
+                .await
+            {
+                Ok(delivery) => delivery,
+                Err(_) => return ExecutionOutcome::Failed("cover_delivery_unavailable"),
+            };
+            *url = delivery;
         }
         self.executor.execute(host, request).await
     }
@@ -1550,7 +1568,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(error_code, "cover_url_rejected");
+        assert_eq!(error_code, "cover_download_rejected");
     }
 
     #[tokio::test]

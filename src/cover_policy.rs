@@ -1,15 +1,33 @@
-use std::{collections::HashSet, net::IpAddr, sync::Arc};
+use std::{
+    collections::HashSet,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, ensure};
-use reqwest::Url;
+use reqwest::{Url, header};
 
 use crate::error::{AppError, AppResult};
 
 const MAX_URL_BYTES: usize = 4 * 1024;
 const MAX_DNS_ADDRESSES: usize = 16;
+const MAX_COVER_BYTES: usize = 8 * 1024 * 1024;
+const ALLOWED_MEDIA_TYPES: [&str; 5] = [
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "image/avif",
+];
 
-/// Policy for URLs that a managed Sunshine host will fetch. Host names are
-/// exact matches: wildcards are intentionally unsupported.
+pub struct VerifiedCover {
+    pub content_type: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+/// Policy for external covers fetched by Manager. Host names are exact
+/// matches: wildcards are intentionally unsupported.
 #[derive(Clone, Debug, Default)]
 pub struct CoverUrlPolicy {
     allowed_hosts: Arc<HashSet<String>>,
@@ -48,6 +66,73 @@ impl CoverUrlPolicy {
     }
 
     pub async fn validate(&self, raw_url: &str) -> AppResult<String> {
+        let (url, _) = self.resolve(raw_url).await?;
+        Ok(url.to_string())
+    }
+
+    pub async fn download(&self, raw_url: &str) -> AppResult<VerifiedCover> {
+        let (url, addresses) = self.resolve(raw_url).await?;
+        let host = url.host_str().ok_or_else(rejected)?;
+        let sockets: Vec<SocketAddr> = addresses
+            .into_iter()
+            .map(|address| SocketAddr::new(address, 443))
+            .collect();
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(host, &sockets)
+            .build()
+            .map_err(|error| AppError::Internal(error.into()))?;
+        let mut response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| AppError::Upstream("approved cover download failed".into()))?;
+        if !response.status().is_success() {
+            return Err(AppError::Upstream(
+                "approved cover download returned a non-success status".into(),
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_COVER_BYTES as u64)
+        {
+            return Err(AppError::Upstream("approved cover is too large".into()));
+        }
+        let media_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(allowed_media_type)
+            .ok_or_else(|| {
+                AppError::Upstream("approved cover has an unsupported media type".into())
+            })?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| AppError::Upstream("approved cover download was interrupted".into()))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_COVER_BYTES {
+                return Err(AppError::Upstream("approved cover is too large".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Err(AppError::Upstream("approved cover is empty".into()));
+        }
+        Ok(VerifiedCover {
+            content_type: media_type,
+            bytes,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.allowed_hosts.is_empty()
+    }
+
+    async fn resolve(&self, raw_url: &str) -> AppResult<(Url, HashSet<IpAddr>)> {
         let raw_url = raw_url.trim();
         if raw_url.is_empty() || raw_url.len() > MAX_URL_BYTES {
             return Err(rejected());
@@ -77,7 +162,7 @@ impl CoverUrlPolicy {
         {
             return Err(rejected());
         }
-        Ok(url.to_string())
+        Ok((url, addresses))
     }
 
     #[cfg(test)]
@@ -97,6 +182,14 @@ impl CoverUrlPolicy {
             && url.port_or_known_default() == Some(443)
             && self.allowed_hosts.contains(&host.to_ascii_lowercase())
     }
+}
+
+fn allowed_media_type(value: &str) -> Option<&'static str> {
+    let candidate = value.split(';').next()?.trim();
+    ALLOWED_MEDIA_TYPES
+        .iter()
+        .copied()
+        .find(|allowed| candidate.eq_ignore_ascii_case(allowed))
 }
 
 fn rejected() -> AppError {
@@ -179,5 +272,16 @@ mod tests {
         }
         assert!(is_public("1.1.1.1".parse().unwrap()));
         assert!(is_public("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn cover_media_type_is_an_exact_image_allowlist() {
+        assert_eq!(allowed_media_type("image/png"), Some("image/png"));
+        assert_eq!(
+            allowed_media_type("IMAGE/JPEG; charset=binary"),
+            Some("image/jpeg")
+        );
+        assert_eq!(allowed_media_type("image/svg+xml"), None);
+        assert_eq!(allowed_media_type("text/html"), None);
     }
 }

@@ -8,7 +8,9 @@ use std::{
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use crate::{auth::InternalAuth, cover_policy::CoverUrlPolicy, crypto::SecretBox};
+use crate::{
+    auth::InternalAuth, cover_policy::CoverUrlPolicy, cover_proxy::CoverProxy, crypto::SecretBox,
+};
 
 #[derive(Clone)]
 pub struct ServeConfig {
@@ -18,6 +20,7 @@ pub struct ServeConfig {
     pub internal_auth: InternalAuth,
     pub secrets: SecretBox,
     pub cover_url_policy: CoverUrlPolicy,
+    pub cover_proxy: CoverProxy,
     pub bootstrap_admin_email: String,
     pub bootstrap_admin_password: Option<String>,
     pub static_dir: PathBuf,
@@ -51,6 +54,17 @@ impl ServeConfig {
             anyhow::bail!("insecure development cookies require a loopback bind address");
         }
 
+        let cover_url_policy =
+            CoverUrlPolicy::from_csv(&value("SUNSHINE_MANAGER_COVER_URL_ALLOWLIST", ""))?;
+        let cover_proxy = match env::var("SUNSHINE_MANAGER_COVER_PROXY_ORIGIN") {
+            Ok(origin) => CoverProxy::from_origin(&origin)?,
+            Err(env::VarError::NotPresent) if cover_url_policy.is_empty() => CoverProxy::disabled(),
+            Err(env::VarError::NotPresent) => anyhow::bail!(
+                "SUNSHINE_MANAGER_COVER_PROXY_ORIGIN is required when cover uploads are enabled"
+            ),
+            Err(error) => return Err(error.into()),
+        };
+
         Ok(Self {
             bind,
             database_url,
@@ -64,10 +78,8 @@ impl ServeConfig {
                 value("SUNSHINE_MANAGER_CREDENTIAL_KEY_ID", "primary"),
                 credential_key,
             )?,
-            cover_url_policy: CoverUrlPolicy::from_csv(&value(
-                "SUNSHINE_MANAGER_COVER_URL_ALLOWLIST",
-                "",
-            ))?,
+            cover_url_policy,
+            cover_proxy,
             bootstrap_admin_email: value(
                 "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL",
                 "admin@example.com",
