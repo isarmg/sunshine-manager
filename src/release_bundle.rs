@@ -619,9 +619,9 @@ mod tests {
     fn extra_files_unknown_fields_and_unbound_release_identity_fail_closed() {
         let fixture = Fixture::new();
         fixture.make_writable();
-        fs::write(fixture.root.join("old-launcher.sh"), b"old").unwrap();
+        fs::write(fixture.root.join("unexpected-launcher.sh"), b"unexpected").unwrap();
         fs::set_permissions(
-            fixture.root.join("old-launcher.sh"),
+            fixture.root.join("unexpected-launcher.sh"),
             fs::Permissions::from_mode(0o444),
         )
         .unwrap();
@@ -629,12 +629,12 @@ mod tests {
         assert!(verify_release_with_options(&fixture.root, false, false).is_err());
 
         fixture.make_writable();
-        fs::remove_file(fixture.root.join("old-launcher.sh")).unwrap();
+        fs::remove_file(fixture.root.join("unexpected-launcher.sh")).unwrap();
         let manifest_path = fixture.root.join(RELEASE_MANIFEST_NAME);
         fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o644)).unwrap();
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["legacy"] = serde_json::json!(true);
+        manifest["unknown_extension"] = serde_json::json!(true);
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o444)).unwrap();
         assert!(verify_release_with_options(&fixture.root, false, false).is_err());

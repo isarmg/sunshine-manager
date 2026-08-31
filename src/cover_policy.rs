@@ -77,6 +77,10 @@ impl CoverUrlPolicy {
             .into_iter()
             .map(|address| SocketAddr::new(address, 443))
             .collect();
+        // Pinning the approved socket set does not replace TLS identity
+        // verification: the URL host remains the SNI/certificate name and the
+        // platform verifier stays mandatory. No insecure development path is
+        // supported here either.
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(15))

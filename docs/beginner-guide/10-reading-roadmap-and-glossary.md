@@ -14,7 +14,7 @@ policy/proxy，最后看 Web、release 和部署。先理解权威状态，再�
 | 重启后 unknown | operation startup recovery |
 | 封面失败 | cover policy、DNS、proxy token |
 | 启动拒绝 | release、database schema、credentials/locks |
-| Web 与实际不一致 | operation polling、Host refresh |
+| Web 与实际不一致 | auth phase、Host overview fetch；operation 当前需从 API 单独查询 |
 
 ## 10.3 练习
 
@@ -23,7 +23,7 @@ policy/proxy，最后看 Web、release 和部署。先理解权威状态，再�
 3. 模拟响应丢失并观察 unknown。
 4. 让 DNS 返回公网+内网地址，确认封面拒绝。
 5. 篡改复制 release 的 Web asset，确认 verify 失败。
-6. 在隔离路径演练带 external key 的 backup/restore。
+6. 证明数据库与错误 external key 组合会被 doctor 拒绝，并记录当前没有受支持 restore 流程。
 
 ## 10.4 术语
 
@@ -38,16 +38,16 @@ policy/proxy，最后看 Web、release 和部署。先理解权威状态，再�
 | SSRF | 服务端被诱导访问敏感网络目标 |
 | DNS rebinding | 同一名称在校验与执行时解析为不同目标 |
 | pin | 把执行连接限制到校验通过的完整地址集合 |
-| credential envelope | 当前认证加密的 Secret 结构 |
+| credential envelope | `sunshine:v1:` 存储结构；只有在 external key 和记录身份/字段域 AAD 下认证成功才是当前密文 |
 | source-bound | binary 身份绑定源码 revision |
 | maintenance lock | 产品与离线工具协调数据库访问的锁 |
 
 ## 10.5 学成标准
 
-应能解释 202/unknown、幂等键与 revision 的区别、为什么远端调用不在 SQLite 事务、封面为何需两次 DNS、
-external key 为什么独立保管、当前 Schema 为什么不现场迁移。
+应能解释 202/unknown、幂等键为何不等于 Host 并发控制、为什么远端调用不在 SQLite 事务、封面为何需
+提交前校验并在执行期重新解析、external key 为什么独立保管、当前 Schema 为什么不现场转换。
 
 ## 10.6 深入入口
 
 完整时序见[工作流程](../project-workflow.md)，能力边界见[功能与取舍](../feature-inventory-and-tradeoffs.md)，
-生产部署、备份、换 key 和事件处置见[运维文档](../operations.md)。
+生产部署、当前连续性限制和事件处置见[运维文档](../operations.md)。

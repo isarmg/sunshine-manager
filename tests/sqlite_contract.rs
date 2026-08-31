@@ -77,6 +77,13 @@ async fn exact_current_schema_is_durable_and_self_identifying() {
         database_schema::actual_schema_sha256(&pool).await.unwrap(),
         database_schema::SCHEMA_SHA256
     );
+    let identity = sarmg_sqlite::require_pool_current_schema(
+        &pool,
+        &database_schema::current_schema_identity(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(identity.application, database_schema::APPLICATION);
     let metadata: (i64, String, String, i64, String) = sqlx::query_as(
         "SELECT singleton,application,application_version,schema_revision,schema_sha256 \
          FROM product_metadata",
@@ -104,18 +111,8 @@ async fn exact_current_schema_is_durable_and_self_identifying() {
     .execute(&pool)
     .await
     .unwrap();
-    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(integrity, "ok");
-    assert!(
-        sqlx::query("PRAGMA foreign_key_check")
-            .fetch_all(&pool)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    sarmg_sqlite::integrity_check(&pool).await.unwrap();
+    sarmg_sqlite::foreign_key_check(&pool).await.unwrap();
     pool.close().await;
 
     let reopened = db::open_existing(&url).await.unwrap();
@@ -129,7 +126,7 @@ async fn exact_current_schema_is_durable_and_self_identifying() {
 }
 
 #[tokio::test]
-async fn existing_empty_legacy_wrong_version_and_drift_are_read_only_rejections() {
+async fn empty_unknown_schema_noncurrent_version_and_drift_are_read_only_rejections() {
     let directory = tempfile::tempdir().unwrap();
 
     let empty = directory.path().join("empty.sqlite3");
@@ -138,11 +135,14 @@ async fn existing_empty_legacy_wrong_version_and_drift_are_read_only_rejections(
     assert!(db::open_or_initialize(&database_url(&empty)).await.is_err());
     assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
 
-    let legacy = directory.path().join("legacy.sqlite3");
-    mutate(&legacy, "CREATE TABLE legacy_data(id INTEGER PRIMARY KEY)");
+    let unknown_schema = directory.path().join("unknown-schema.sqlite3");
+    mutate(
+        &unknown_schema,
+        "CREATE TABLE unknown_data(id INTEGER PRIMARY KEY)",
+    );
     let before = stable_directory_snapshot(directory.path());
     assert!(
-        db::open_or_initialize(&database_url(&legacy))
+        db::open_or_initialize(&database_url(&unknown_schema))
             .await
             .is_err()
     );
@@ -155,7 +155,7 @@ async fn existing_empty_legacy_wrong_version_and_drift_are_read_only_rejections(
     pool.close().await;
     mutate(
         &wrong_version,
-        "UPDATE product_metadata SET application_version='0.6.0'",
+        "UPDATE product_metadata SET application_version='0.0.0'",
     );
     let before = stable_directory_snapshot(directory.path());
     assert!(

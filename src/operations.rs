@@ -8,7 +8,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use tokio::{
     sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard},
@@ -20,7 +19,7 @@ use crate::{
     client::UpstreamClient,
     cover_policy::CoverUrlPolicy,
     cover_proxy::CoverProxy,
-    crypto::SecretBox,
+    crypto::{SecretBox, constant_time_equal_32},
     db,
     error::{AppError, AppResult},
     model::Host,
@@ -121,7 +120,7 @@ pub struct OperationView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RemoteOperationRequest {
     AppsSave { body: Value },
     AppsClose,
@@ -217,8 +216,8 @@ impl OperationManager {
         validate_actor(actor)?;
         let plaintext =
             serde_json::to_string(request).map_err(|error| AppError::Internal(error.into()))?;
-        let request_fingerprint = Sha256::digest(plaintext.as_bytes());
-        let key_hash = Sha256::digest(idempotency_key.as_bytes());
+        let request_fingerprint = self.secrets.operation_request_fingerprint(&plaintext);
+        let key_hash = self.secrets.operation_idempotency_key_hash(idempotency_key);
         let Some(existing) =
             find_existing(&self.pool, actor, host_id, request.action(), &key_hash).await?
         else {
@@ -239,8 +238,8 @@ impl OperationManager {
 
         let plaintext =
             serde_json::to_string(&request).map_err(|error| AppError::Internal(error.into()))?;
-        let request_fingerprint = Sha256::digest(plaintext.as_bytes()).to_vec();
-        let key_hash = Sha256::digest(idempotency_key.as_bytes()).to_vec();
+        let request_fingerprint = self.secrets.operation_request_fingerprint(&plaintext);
+        let key_hash = self.secrets.operation_idempotency_key_hash(idempotency_key);
         let action = request.action();
         if let Some(existing) = find_existing(&self.pool, actor, host_id, action, &key_hash).await?
         {
@@ -248,8 +247,10 @@ impl OperationManager {
         }
 
         db::get_host(&self.pool, &self.secrets, host_id).await?;
-        let ciphertext = self.secrets.encrypt(&plaintext)?;
         let operation_id = format!("op_{}", Uuid::new_v4());
+        let ciphertext =
+            self.secrets
+                .encrypt_operation_request(&operation_id, action, &plaintext)?;
         let outbox_id = format!("out_{}", Uuid::new_v4());
         let now = db::now_micros()?;
 
@@ -266,8 +267,8 @@ impl OperationManager {
         .bind(actor)
         .bind(host_id)
         .bind(action)
-        .bind(&key_hash)
-        .bind(&request_fingerprint)
+        .bind(key_hash.as_slice())
+        .bind(request_fingerprint.as_slice())
         .bind(ciphertext)
         .bind(now)
         .bind(now)
@@ -629,7 +630,11 @@ impl OperationManager {
     async fn execute_claimed(&self, operation: &ClaimedOperation) -> ExecutionOutcome {
         let request = self
             .secrets
-            .decrypt(&operation.request_ciphertext)
+            .decrypt_operation_request(
+                &operation.operation_id,
+                &operation.action,
+                &operation.request_ciphertext,
+            )
             .ok()
             .and_then(|plaintext| serde_json::from_str::<RemoteOperationRequest>(&plaintext).ok());
         let Some(mut request) = request else {
@@ -886,9 +891,9 @@ async fn find_existing_in_transaction(
 
 fn compare_existing(
     existing: ExistingOperation,
-    request_fingerprint: &[u8],
+    request_fingerprint: &[u8; 32],
 ) -> AppResult<OperationView> {
-    if existing.request_fingerprint != request_fingerprint {
+    if !constant_time_equal_32(&existing.request_fingerprint, request_fingerprint) {
         return Err(AppError::Conflict(
             "Idempotency-Key was already used with a different request".into(),
         ));
@@ -1098,6 +1103,7 @@ fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    use sha2::{Digest as _, Sha256};
     use tempfile::TempDir;
 
     use super::*;
@@ -1280,7 +1286,7 @@ mod tests {
 
     #[tokio::test]
     async fn idempotency_is_conflict_safe_and_sensitive_requests_are_encrypted() {
-        let (_directory, _url, pool, _secrets, manager, host_id) =
+        let (_directory, _url, pool, secrets, manager, host_id) =
             test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
         let request = RemoteOperationRequest::Pin {
             pin: "8642".into(),
@@ -1320,8 +1326,45 @@ mod tests {
         assert!(ciphertext.starts_with("sunshine:v1:"));
         assert!(!ciphertext.contains("8642"));
         assert!(!ciphertext.contains("private-laptop"));
+        let expected_plaintext = serde_json::to_string(&RemoteOperationRequest::Pin {
+            pin: "8642".into(),
+            name: "private-laptop".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            secrets
+                .decrypt_operation_request(
+                    &first.operation_id,
+                    "sunshine.client.pair",
+                    &ciphertext,
+                )
+                .unwrap(),
+            expected_plaintext
+        );
         assert_eq!(fingerprint.len(), 32);
         assert_eq!(key_hash.len(), 32);
+        assert_eq!(
+            fingerprint.as_slice(),
+            secrets
+                .operation_request_fingerprint(&expected_plaintext)
+                .as_slice()
+        );
+        assert_eq!(
+            key_hash.as_slice(),
+            secrets
+                .operation_idempotency_key_hash("pair-request-1")
+                .as_slice()
+        );
+        assert_ne!(
+            fingerprint,
+            Sha256::digest(expected_plaintext.as_bytes()).to_vec(),
+            "a low-entropy request must not retain its bare SHA-256 digest"
+        );
+        assert_ne!(
+            key_hash,
+            Sha256::digest(b"pair-request-1").to_vec(),
+            "an idempotency key must not retain its bare SHA-256 digest"
+        );
         let stored_operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
             .fetch_one(&pool)
             .await
@@ -1388,6 +1431,96 @@ mod tests {
         assert!(validate_idempotency_key("").is_err());
         assert!(validate_idempotency_key("has whitespace").is_err());
         assert!(validate_idempotency_key(&"x".repeat(129)).is_err());
+    }
+
+    #[tokio::test]
+    async fn moved_operation_ciphertext_is_rejected_at_startup_and_execution() {
+        let (_directory, _url, pool, secrets, manager, host_id) =
+            test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
+        let first = manager
+            .enqueue(
+                ACTOR,
+                &host_id,
+                "aad-operation-1",
+                RemoteOperationRequest::Pin {
+                    pin: "1111".into(),
+                    name: "first-client".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let second = manager
+            .enqueue(
+                ACTOR,
+                &host_id,
+                "aad-operation-2",
+                RemoteOperationRequest::Pin {
+                    pin: "2222".into(),
+                    name: "second-client".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let first_plaintext = serde_json::to_string(&RemoteOperationRequest::Pin {
+            pin: "1111".into(),
+            name: "first-client".into(),
+        })
+        .unwrap();
+        let bare_fingerprint = Sha256::digest(first_plaintext.as_bytes()).to_vec();
+        sqlx::query("UPDATE operations SET request_fingerprint=? WHERE operation_id=?")
+            .bind(bare_fingerprint.as_slice())
+            .bind(&first.operation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!db::doctor(&pool, &secrets).await.encrypted_values_ready);
+        assert!(
+            db::require_current_runtime_state(&pool, &secrets)
+                .await
+                .is_err()
+        );
+        let current_fingerprint = secrets.operation_request_fingerprint(&first_plaintext);
+        sqlx::query("UPDATE operations SET request_fingerprint=? WHERE operation_id=?")
+            .bind(current_fingerprint.as_slice())
+            .bind(&first.operation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        db::require_current_runtime_state(&pool, &secrets)
+            .await
+            .unwrap();
+
+        let second_ciphertext: String =
+            sqlx::query_scalar("SELECT request_ciphertext FROM operations WHERE operation_id=?")
+                .bind(&second.operation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("UPDATE operations SET request_ciphertext=? WHERE operation_id=?")
+            .bind(second_ciphertext)
+            .bind(&first.operation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            db::require_current_runtime_state(&pool, &secrets)
+                .await
+                .is_err()
+        );
+        manager.execute_one(&first.operation_id, &host_id).await;
+        let failed = manager
+            .get_for_actor(ACTOR, &first.operation_id)
+            .await
+            .unwrap();
+        assert_eq!(failed.state, OperationState::Failed);
+        let error_code: String =
+            sqlx::query_scalar("SELECT error_code FROM operations WHERE operation_id=?")
+                .bind(&first.operation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(error_code, "request_corrupt");
     }
 
     #[tokio::test]

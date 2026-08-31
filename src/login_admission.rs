@@ -201,17 +201,17 @@ mod tests {
         let admission = LoginAdmission::with_limits(Duration::from_secs(60), 3, 2, 4, 1);
         let source = Some("192.0.2.10".parse().unwrap());
 
-        admission.admit(source, "first@example.com").await.unwrap();
-        admission.admit(source, "first@example.com").await.unwrap();
+        admission.admit(source, "first.admin").await.unwrap();
+        admission.admit(source, "first.admin").await.unwrap();
         assert!(matches!(
-            admission.admit(source, "first@example.com").await,
+            admission.admit(source, "first.admin").await,
             Err(AppError::TooManyRequests { retry_after }) if retry_after > 0
         ));
 
-        admission.clear_account("first@example.com").await;
-        admission.admit(source, "first@example.com").await.unwrap();
+        admission.clear_account("first.admin").await;
+        admission.admit(source, "first.admin").await.unwrap();
         assert!(matches!(
-            admission.admit(source, "second@example.com").await,
+            admission.admit(source, "second.admin").await,
             Err(AppError::TooManyRequests { .. })
         ));
     }

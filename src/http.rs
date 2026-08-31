@@ -3,10 +3,14 @@ use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time:
 use axum::{
     Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Request, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
+};
+use sarmg_contracts::{
+    ADMIN_LOGIN_PATH, ADMIN_LOGOUT_PATH, ADMIN_SESSION_PATH, AdministratorLoginRequest,
+    AdministratorSession,
 };
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -30,7 +34,7 @@ use crate::{
         HostMutationLocks, OperationManager, OperationView, RemoteOperationRequest,
         validate_idempotency_key,
     },
-    release_contract::{API_NAMESPACE, API_VERSION_PREFIX},
+    release_contract::{API_NAMESPACE, API_PREFIX, API_VERSION_PREFIX},
 };
 
 #[derive(Clone)]
@@ -107,7 +111,7 @@ pub fn router(state: WorkerState) -> Router {
         .route("/health/ready", get(ready));
 
     let public_api = Router::new()
-        .route("/auth/login", post(login))
+        .route(auth_path_within_current_api(ADMIN_LOGIN_PATH), post(login))
         .route(
             "/sunshine/internal/hosts/{host_id}/operations/{operation_id}/covers/{token}",
             get(cover_delivery),
@@ -115,8 +119,14 @@ pub fn router(state: WorkerState) -> Router {
         .layer(DefaultBodyLimit::max(16 * 1024));
 
     let protected_api = Router::new()
-        .route("/auth/logout", post(logout))
-        .route("/auth/session", get(session))
+        .route(
+            auth_path_within_current_api(ADMIN_LOGOUT_PATH),
+            post(logout),
+        )
+        .route(
+            auth_path_within_current_api(ADMIN_SESSION_PATH),
+            get(session),
+        )
         .route("/sunshine/operations/{operation_id}", get(operation_get))
         .route(
             "/sunshine/operations/{operation_id}/retry",
@@ -169,6 +179,12 @@ pub fn router(state: WorkerState) -> Router {
         .with_state(state)
 }
 
+fn auth_path_within_current_api(path: &'static str) -> &'static str {
+    path.strip_prefix(API_PREFIX)
+        .filter(|relative| relative.starts_with('/'))
+        .expect("Foundation administrator path must belong to the current API")
+}
+
 async fn authenticate(
     State(state): State<WorkerState>,
     mut request: Request,
@@ -188,11 +204,16 @@ async fn authenticate(
     .await?
     .ok_or(AppError::Unauthorized)?;
     if is_mutation(request.method()) {
-        verify_mutation_request(request.headers(), &session.csrf_hash)?;
+        verify_mutation_request(
+            request.headers(),
+            request.uri(),
+            &session.csrf_hash,
+            state.auth.origin_mode(),
+        )?;
     }
     request.extensions_mut().insert(InternalIdentity {
         subject: session.user_id,
-        email: session.email,
+        username: session.username,
         session_id: session.session_id,
         csrf_hash: session.csrf_hash,
     });
@@ -223,24 +244,22 @@ async fn ready(State(state): State<WorkerState>) -> Response {
     response
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LoginRequest {
-    email: String,
-    password: String,
-}
-
 async fn login(
     State(state): State<WorkerState>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
-    Json(request): Json<LoginRequest>,
+    uri: Uri,
+    headers: HeaderMap,
+    Json(request): Json<AdministratorLoginRequest>,
 ) -> AppResult<Response> {
-    let normalized_email = request.email.trim().to_lowercase();
+    verify_same_origin(&headers, &uri, state.auth.origin_mode())?;
+    let normalized_username = crate::auth::normalize_administrator_username(&request.username)?;
+    sarmg_admin_auth::validate_password(&request.password)
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
     state
         .login_admission
-        .admit(Some(source.ip()), &normalized_email)
+        .admit(Some(source.ip()), &normalized_username)
         .await?;
-    let user = db::find_active_user_by_email(&state.pool, &normalized_email).await?;
+    let user = db::find_active_user_by_username(&state.pool, &normalized_username).await?;
     let password_hash = user
         .as_ref()
         .map(|user| user.password_hash.clone())
@@ -258,27 +277,25 @@ async fn login(
     let Some(user) = user.filter(|_| verified) else {
         return Err(AppError::Unauthorized);
     };
-    state.login_admission.clear_account(&normalized_email).await;
+    state
+        .login_admission
+        .clear_account(&normalized_username)
+        .await;
     let now = db::now_micros()?;
     let session = state.auth.issue(now)?;
     db::create_session(&state.pool, &user, &session, now).await?;
     let session_cookie = HeaderValue::from_str(&state.auth.session_cookie(&session.token))
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    let csrf_cookie = HeaderValue::from_str(&state.auth.csrf_cookie(&session.csrf_token))
+    let public_session = AdministratorSession::new(user.user_id, user.username, session.csrf_token)
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    let mut response = Json(serde_json::json!({
-        "authenticated": true,
-        "user_id": user.user_id,
-        "email": user.email,
-        "csrf_token": session.csrf_token
-    }))
-    .into_response();
+    let mut response = Json(public_session).into_response();
     response
         .headers_mut()
         .append(header::SET_COOKIE, session_cookie);
-    response
-        .headers_mut()
-        .append(header::SET_COOKIE, csrf_cookie);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private, max-age=0"),
+    );
     Ok(response)
 }
 
@@ -289,34 +306,38 @@ async fn logout(
     db::revoke_session(&state.pool, &identity.session_id, db::now_micros()?).await?;
     let session_cookie = HeaderValue::from_str(&state.auth.expired_session_cookie())
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    let csrf_cookie = HeaderValue::from_str(&state.auth.expired_csrf_cookie())
-        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
     let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
         .append(header::SET_COOKIE, session_cookie);
-    response
-        .headers_mut()
-        .append(header::SET_COOKIE, csrf_cookie);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private, max-age=0"),
+    );
     Ok(response)
 }
 
 async fn session(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
-    headers: HeaderMap,
-) -> AppResult<Json<serde_json::Value>> {
-    let csrf_token = state
-        .auth
-        .parse_csrf_token(&headers)
-        .filter(|token| crate::auth::token_matches_hash(token, &identity.csrf_hash))
-        .ok_or(AppError::Unauthorized)?;
-    Ok(Json(serde_json::json!({
-        "authenticated": true,
-        "user_id": identity.subject,
-        "email": identity.email,
-        "csrf_token": csrf_token
-    })))
+) -> AppResult<Response> {
+    let csrf_token = sarmg_admin_auth::random_token()
+        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    db::rotate_session_csrf(
+        &state.pool,
+        &identity.session_id,
+        &crate::auth::token_hash(&csrf_token),
+        db::now_micros()?,
+    )
+    .await?;
+    let public_session = AdministratorSession::new(identity.subject, identity.username, csrf_token)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    let mut response = Json(public_session).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private, max-age=0"),
+    );
+    Ok(response)
 }
 
 fn is_mutation(method: &Method) -> bool {
@@ -326,33 +347,42 @@ fn is_mutation(method: &Method) -> bool {
     )
 }
 
-fn verify_mutation_request(headers: &HeaderMap, expected_csrf_hash: &[u8]) -> AppResult<()> {
-    let csrf = headers
-        .get("x-csrf-token")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| crate::auth::token_matches_hash(value, expected_csrf_hash))
-        .ok_or_else(|| AppError::Forbidden("invalid CSRF token".into()))?;
-    let _ = csrf;
-    verify_same_origin(headers)
+fn verify_mutation_request(
+    headers: &HeaderMap,
+    uri: &Uri,
+    expected_csrf_hash: &[u8],
+    origin_mode: sarmg_admin_auth::AdministratorOriginMode,
+) -> AppResult<()> {
+    let csrf_values = header_values(headers, sarmg_admin_auth::CSRF_HEADER);
+    sarmg_admin_auth::require_csrf_token_matches_hash(&csrf_values, expected_csrf_hash)
+        .map_err(|_| AppError::Forbidden("invalid CSRF token".into()))?;
+    verify_same_origin(headers, uri, origin_mode)
 }
 
-fn verify_same_origin(headers: &HeaderMap) -> AppResult<()> {
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| reqwest::Url::parse(value).ok())
-        .filter(|url| matches!(url.scheme(), "http" | "https"))
-        .ok_or_else(|| AppError::Forbidden("missing or invalid Origin header".into()))?;
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| AppError::Forbidden("missing Host header".into()))?;
-    let expected = reqwest::Url::parse(&format!("{}://{host}", origin.scheme()))
-        .map_err(|_| AppError::Forbidden("invalid Host header".into()))?;
-    if origin.origin() != expected.origin() {
-        return Err(AppError::Forbidden("cross-origin mutation rejected".into()));
+fn verify_same_origin(
+    headers: &HeaderMap,
+    uri: &Uri,
+    origin_mode: sarmg_admin_auth::AdministratorOriginMode,
+) -> AppResult<()> {
+    let origins = header_values(headers, header::ORIGIN.as_str());
+    let mut hosts = header_values(headers, header::HOST.as_str());
+    if let Some(authority) = uri.authority() {
+        hosts.push(authority.as_str().as_bytes().to_vec());
     }
-    Ok(())
+    let sites = header_values(headers, sarmg_admin_auth::SEC_FETCH_SITE_HEADER);
+    sarmg_admin_auth::require_administrator_same_origin(origin_mode, &origins, &hosts, &sites)
+        .map(|_| ())
+        .map_err(|_| AppError::Forbidden("cross-origin request rejected".into()))
+}
+
+/// Axum adapter for the Foundation policy: retain every raw field-line so
+/// duplicate or comma-joined security headers cannot be normalized away.
+fn header_values(headers: &HeaderMap, name: &str) -> Vec<Vec<u8>> {
+    headers
+        .get_all(name)
+        .iter()
+        .map(|value| value.as_bytes().to_vec())
+        .collect()
 }
 
 async fn list_hosts(State(state): State<WorkerState>) -> AppResult<Json<Vec<HostInfo>>> {
@@ -928,6 +958,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use http_body_util::BodyExt;
+    use sarmg_error::ErrorEnvelope;
     use sqlx::sqlite::SqlitePoolOptions;
     use tower::ServiceExt;
 
@@ -991,14 +1022,94 @@ mod tests {
             .oneshot(
                 Request::post("/api/v2/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                     .body(Body::from(
-                        r#"{"email":"admin@example.com","password":"bad-password"}"#,
+                        r#"{"username":"admin","password":"bad-password"}"#,
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn uri_authority_is_used_only_when_host_is_absent() {
+        let application = test_router().await;
+        let body = r#"{"username":"admin","password":"bad-password"}"#;
+
+        let authority_only = Request::post("http://localhost/api/v2/auth/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ORIGIN, "http://localhost")
+            .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(
+            application
+                .clone()
+                .oneshot(authority_only)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let ambiguous = Request::post("http://localhost/api/v2/auth/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://localhost")
+            .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(
+            application.oneshot(ambiguous).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn login_policy_violations_are_bad_requests() {
+        for body in [
+            r#"{"username":"admin@example.com","password":"correct-password"}"#,
+            r#"{"username":"admin","password":"too-short"}"#,
+        ] {
+            let response = test_router()
+                .await
+                .oneshot(
+                    Request::post("/api/v2/auth/login")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::HOST, "localhost")
+                        .header(header::ORIGIN, "http://localhost")
+                        .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn email_field_is_rejected_instead_of_becoming_a_login_alias() {
+        let response = test_router()
+            .await
+            .oneshot(
+                Request::post("/api/v2/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
+                    .body(Body::from(
+                        r#"{"email":"admin","password":"correct-password"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -1015,9 +1126,7 @@ mod tests {
                         .method(method)
                         .uri(path)
                         .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(
-                            r#"{"email":"admin@example.com","password":"password"}"#,
-                        ))
+                        .body(Body::from(r#"{"username":"admin","password":"password"}"#))
                         .unwrap(),
                 )
                 .await
@@ -1029,7 +1138,7 @@ mod tests {
     #[tokio::test]
     async fn login_body_is_bounded_before_password_work() {
         let oversized = serde_json::json!({
-            "email": "admin@example.com",
+            "username": "admin",
             "password": "x".repeat(20 * 1024)
         })
         .to_string();
@@ -1038,6 +1147,9 @@ mod tests {
             .oneshot(
                 Request::post("/api/v2/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                     .body(Body::from(oversized))
                     .unwrap(),
             )
@@ -1054,13 +1166,9 @@ mod tests {
             .await
             .unwrap();
         db::initialize_empty(&pool).await.unwrap();
-        db::ensure_admin_user(
-            &pool,
-            "admin@example.com",
-            Some("correct horse battery staple"),
-        )
-        .await
-        .unwrap();
+        db::ensure_admin_user(&pool, "admin", Some("correct horse battery staple"))
+            .await
+            .unwrap();
         let state = WorkerState::new(
             pool.clone(),
             SecretBox::new("test", [2; 32]).unwrap(),
@@ -1083,14 +1191,21 @@ mod tests {
             .oneshot(
                 Request::post("/api/v2/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                     .body(Body::from(
-                        r#"{"email":"admin@example.com","password":"correct horse battery staple"}"#,
+                        r#"{"username":" Admin ","password":"correct horse battery staple"}"#,
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(login.status(), StatusCode::OK);
+        assert_eq!(
+            login.headers()[header::CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
         let cookie = login
             .headers()
             .get_all(header::SET_COOKIE)
@@ -1099,9 +1214,23 @@ mod tests {
             .collect::<Vec<_>>()
             .join("; ");
         assert!(cookie.contains("sunshine_session="));
-        assert!(cookie.contains("sunshine_csrf="));
+        assert!(!cookie.contains("sunshine_csrf="));
         let login_body: Value =
             serde_json::from_slice(&login.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let mut session_keys = login_body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        session_keys.sort_unstable();
+        assert_eq!(
+            session_keys,
+            ["authenticated", "csrf_token", "role", "user_id", "username"]
+        );
+        assert_eq!(login_body["authenticated"], true);
+        assert_eq!(login_body["username"], "admin");
+        assert_eq!(login_body["role"], "admin");
         let csrf = login_body["csrf_token"].as_str().unwrap().to_string();
         assert!(!csrf.is_empty());
         let stored_hash: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM auth_sessions")
@@ -1116,6 +1245,28 @@ mod tests {
         assert_eq!(crate::auth::token_hash(session_token), stored_hash);
         assert_ne!(session_token.as_bytes(), stored_hash);
 
+        for (name, value) in [
+            (sarmg_admin_auth::ORIGIN_HEADER, "http://localhost"),
+            (sarmg_admin_auth::HOST_HEADER, "localhost"),
+            (sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin"),
+            (sarmg_admin_auth::CSRF_HEADER, csrf.as_str()),
+        ] {
+            let mut request = Request::post("/api/v2/auth/logout")
+                .header(header::COOKIE, &cookie)
+                .header(sarmg_admin_auth::CSRF_HEADER, &csrf)
+                .header(header::HOST, "localhost")
+                .header(header::ORIGIN, "http://localhost")
+                .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
+                .body(Body::empty())
+                .unwrap();
+            request.headers_mut().append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+            let response = application.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{name}");
+        }
+
         let current = application
             .clone()
             .oneshot(
@@ -1127,6 +1278,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(current.status(), StatusCode::OK);
+        let current_body: Value =
+            serde_json::from_slice(&current.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let refreshed_csrf = current_body["csrf_token"].as_str().unwrap().to_string();
+        assert_ne!(refreshed_csrf, csrf);
+
+        let superseded_csrf = application
+            .clone()
+            .oneshot(
+                Request::post("/api/v2/auth/logout")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", &csrf)
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(superseded_csrf.status(), StatusCode::FORBIDDEN);
 
         let missing_csrf = application
             .clone()
@@ -1135,19 +1307,27 @@ mod tests {
                     .header(header::COOKIE, &cookie)
                     .header(header::HOST, "localhost")
                     .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(missing_csrf.status(), StatusCode::FORBIDDEN);
+        let envelope: ErrorEnvelope =
+            serde_json::from_slice(&missing_csrf.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(envelope.code.as_str(), "forbidden");
+        assert_eq!(envelope.message, "invalid CSRF token");
+        assert!(!envelope.retryable);
+        assert!(envelope.request_id.is_none() && envelope.details.is_empty());
 
         let missing_origin = application
             .clone()
             .oneshot(
                 Request::post("/api/v2/auth/logout")
                     .header(header::COOKIE, &cookie)
-                    .header("x-csrf-token", &csrf)
+                    .header("x-csrf-token", &refreshed_csrf)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1160,9 +1340,10 @@ mod tests {
             .oneshot(
                 Request::post("/api/v2/auth/logout")
                     .header(header::COOKIE, &cookie)
-                    .header("x-csrf-token", &csrf)
+                    .header("x-csrf-token", &refreshed_csrf)
                     .header(header::HOST, "localhost")
                     .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1180,6 +1361,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+        let envelope: ErrorEnvelope =
+            serde_json::from_slice(&revoked.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(envelope.code.as_str(), "unauthorized");
+        assert!(!envelope.retryable);
     }
 
     #[tokio::test]
@@ -1190,13 +1376,9 @@ mod tests {
             .await
             .unwrap();
         db::initialize_empty(&pool).await.unwrap();
-        db::ensure_admin_user(
-            &pool,
-            "admin@example.com",
-            Some("correct horse battery staple"),
-        )
-        .await
-        .unwrap();
+        db::ensure_admin_user(&pool, "admin", Some("correct horse battery staple"))
+            .await
+            .unwrap();
         let secrets = SecretBox::new("test", [12; 32]).unwrap();
         let host = db::insert_host(
             &pool,
@@ -1225,7 +1407,7 @@ mod tests {
         )
         .unwrap();
         let actor: String =
-            sqlx::query_scalar("SELECT user_id FROM auth_users WHERE email='admin@example.com'")
+            sqlx::query_scalar("SELECT user_id FROM auth_users WHERE username='admin'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -1252,8 +1434,11 @@ mod tests {
             .oneshot(
                 Request::post("/api/v2/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                     .body(Body::from(
-                        r#"{"email":"admin@example.com","password":"correct horse battery staple"}"#,
+                        r#"{"username":"admin","password":"correct horse battery staple"}"#,
                     ))
                     .unwrap(),
             )
@@ -1280,6 +1465,7 @@ mod tests {
                     .header("x-csrf-token", csrf)
                     .header(header::HOST, "localhost")
                     .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1295,6 +1481,7 @@ mod tests {
                     .header("x-csrf-token", csrf)
                     .header(header::HOST, "localhost")
                     .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                     .header("idempotency-key", "restart-browser-1")
                     .body(Body::empty())
                     .unwrap(),
@@ -1316,6 +1503,7 @@ mod tests {
                     .header("x-csrf-token", csrf)
                     .header(header::HOST, "localhost")
                     .header(header::ORIGIN, "http://localhost")
+                    .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                     .header("idempotency-key", "restart-browser-1")
                     .body(Body::empty())
                     .unwrap(),
@@ -1359,6 +1547,7 @@ mod tests {
                         .header("x-csrf-token", csrf)
                         .header(header::HOST, "localhost")
                         .header(header::ORIGIN, "http://localhost")
+                        .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                         .header(header::CONTENT_TYPE, "application/json")
                         .header("idempotency-key", "config-browser-1")
                         .body(Body::from(body))
@@ -1390,6 +1579,7 @@ mod tests {
                         .header("x-csrf-token", csrf)
                         .header(header::HOST, "localhost")
                         .header(header::ORIGIN, "http://localhost")
+                        .header(sarmg_admin_auth::SEC_FETCH_SITE_HEADER, "same-origin")
                         .header(header::CONTENT_TYPE, "application/json")
                         .header("idempotency-key", "cover-browser-1")
                         .body(Body::from(

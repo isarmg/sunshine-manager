@@ -1,64 +1,98 @@
-import { FormEvent, useEffect, useState } from "react";
-import { CURRENT_API_PREFIX, login, logout, requestJson, restoreSession } from "./api";
-
-type Host = Record<string, unknown>;
+import { useAdministratorSession } from "@sarmg/admin-web/react";
+import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import {
+  CURRENT_API_PREFIX,
+  adminApi,
+  currentErrorEnvelope,
+  isHostInfoArray,
+  requestJson,
+  type HostInfo,
+} from "./api";
 
 export default function App() {
-  const [authenticated, setAuthenticated] = useState(false);
-  const [hosts, setHosts] = useState<Host[]>([]);
-  const [email, setEmail] = useState("admin@example.com");
+  const authentication = useAdministratorSession(adminApi);
+  const [hosts, setHosts] = useState<HostInfo[]>([]);
+  const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const [sessionChecked, setSessionChecked] = useState(false);
 
   useEffect(() => {
-    restoreSession()
-      .then(() => setAuthenticated(true))
-      .catch(() => setAuthenticated(false))
-      .finally(() => setSessionChecked(true));
-  }, []);
-
-  useEffect(() => {
-    if (authenticated) {
-      requestJson<Host[]>(`${CURRENT_API_PREFIX}/sunshine/hosts`)
-        .then(setHosts)
-        .catch(() => setAuthenticated(false));
+    if (authentication.phase !== "authenticated") {
+      setHosts([]);
+      setError("");
+      return;
     }
-  }, [authenticated]);
+    let cancelled = false;
+    requestJson(`${CURRENT_API_PREFIX}/sunshine/hosts`, isHostInfoArray)
+      .then((received) => {
+        if (!cancelled) setHosts(received);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setError(currentErrorEnvelope(cause)?.message ?? "无法加载主机列表");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authentication.phase]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     try {
-      await login(email, password);
-      setAuthenticated(true);
+      await authentication.login(username, password);
       setError("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "login failed");
+      setError(currentErrorEnvelope(cause)?.message ?? "登录失败");
     }
   };
 
   const leave = async () => {
-    await logout();
-    setAuthenticated(false);
-    setHosts([]);
+    try {
+      await authentication.logout();
+      setError("");
+    } catch (cause) {
+      setError(currentErrorEnvelope(cause)?.message ?? "退出失败");
+    }
   };
 
-  if (!sessionChecked) {
+  if (authentication.phase === "loading") {
     return <main>正在检查会话…</main>;
   }
 
-  if (!authenticated) {
+  if (authentication.phase === "error") {
+    return (
+      <main>
+        <h1>Sunshine Manager</h1>
+        <p>{currentErrorEnvelope(authentication.error)?.message ?? "无法恢复会话"}</p>
+        <button onClick={() => void authentication.restore()}>重试</button>
+      </main>
+    );
+  }
+
+  if (authentication.phase === "anonymous") {
     return (
       <main>
         <h1>Sunshine Manager</h1>
         <form onSubmit={submit}>
           <input
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
+            type="text"
+            name="username"
+            aria-label="管理员用户名"
+            autoComplete="username"
+            maxLength={64}
+            required
+            spellCheck={false}
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
           />
           <input
             type="password"
+            name="password"
+            aria-label="管理员密码"
+            autoComplete="current-password"
+            required
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
@@ -72,7 +106,9 @@ export default function App() {
   return (
     <main>
       <h1>Sunshine Manager</h1>
+      <p>{authentication.session.username}</p>
       <button onClick={leave}>退出</button>
+      {error && <p>{error}</p>}
       <pre>{JSON.stringify(hosts, null, 2)}</pre>
     </main>
   );

@@ -5,7 +5,7 @@
 仓库固定 Rust `1.98.0`，Web 使用 lockfile 对应 Node/npm。先建立不修改锁图的基线：
 
 ```bash
-cargo +1.98.0 check --locked --all-targets
+cargo +1.98.0 check --locked --target x86_64-unknown-linux-gnu --all-targets
 cd clients/web
 npm ci
 npm run build
@@ -13,8 +13,9 @@ npm run build
 
 ## 2.2 临时依赖
 
-准备仅当前用户可访问的临时 SQLite 目录、已构建 Web `dist`、开发管理员密码、随机 32 字节 Base64
-credential key 与明确 key ID。可使用测试 Sunshine 或仓库 mock，不要指向生产 Host。
+准备仅当前用户可访问的临时 SQLite 目录、已构建 Web `dist`、开发管理员 username/密码、随机 32 字节
+Base64 credential key 与明确 key ID。username 默认 `admin`，必须满足 3–64 字节 canonical 规则；它不是
+邮箱。可使用测试 Sunshine 或仓库 mock，不要指向生产 Host。
 
 ## 2.3 开发启动
 
@@ -28,8 +29,9 @@ cargo +1.98.0 run -- serve
 
 ## 2.4 第一次浏览器流程
 
-登录后检查 Session/CSRF，再添加一个测试 Host。读取请求可以直接查询 Sunshine；写请求应返回 operation。
-轮询 operation 到 `succeeded`、`failed` 或 `unknown`，不要以页面按钮消失作为成功证据。
+登录内置 Web 后检查 Session/CSRF 与 Host 只读概览。新增测试 Host 和其他写入需要通过当前同源 API 或
+受控测试调用方完成；当前 Web 没有这些管理表单。远端写请求应返回 operation，调用方轮询到
+`succeeded`、`failed` 或 `unknown`，不能把 HTTP 202 当成远端成功。
 
 ## 2.5 第一次封面练习
 

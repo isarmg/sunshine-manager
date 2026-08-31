@@ -2,8 +2,8 @@
 
 ## 6.1 Host 记录
 
-Host 保存展示身份、规范 endpoint、TLS/连接策略和加密 credential。新增/修改时先验证 URL scheme、Host、
-端口和边界；不能允许 URL 用户信息把密码混入日志或错误。
+Host 保存展示身份、规范 host/port 和加密 credential。URL scheme 不是输入字段：Manager 总是由 host 与
+port 生成 HTTPS endpoint。新增/修改时验证 DNS/IP、端口和文本边界；不能允许 URL 用户信息进入模型。
 
 ## 6.2 TLS
 
@@ -13,12 +13,15 @@ Host 保存展示身份、规范 endpoint、TLS/连接策略和加密 credential
 ## 6.3 客户端管理
 
 Manager 查询 Sunshine 已配对客户端并通过持久 operation 执行支持的管理动作。列表是读取时快照；在
-用户确认与执行之间可能变化，因此 mutation 需要稳定远端 ID/当前 revision，而非仅用显示名。
+用户确认与执行之间可能变化，因此 mutation 使用稳定远端 UUID，而非仅用显示名。当前 Host CRUD 没有
+revision/`If-Match`；两个页面同时修改 Host 时是后写覆盖先写，管理员应在变更前刷新。
 
 ## 6.4 应用管理
 
-应用 DTO 包含 Sunshine 支持的命令、工作目录、图像等字段。输入必须限制长度、集合和控制字符；Manager
-不是通用远程 Shell UI，不额外扩展任意 Host 命令能力。
+应用保存请求当前把 Sunshine application JSON 作为不透明顶层 object 传递，只限制序列化后不超过
+256 KiB；Manager 没有逐字段复制 Sunshine 的 command、working directory 或 image Schema。应用列表仅
+要求 `apps` 为最多 512 个 object。这个取舍避免维护另一份上游 Schema，但字段语义和命令风险仍由当前
+Sunshine API 决定；Manager 也没有额外的 Host OS 任意命令 route。
 
 ## 6.5 删除语义
 
@@ -27,13 +30,15 @@ UI 不能提前从列表永久移除项目而掩盖未知结果。
 
 ## 6.6 并发编辑
 
-资源 revision 与 Idempotency-Key 分别解决“基于过期页面覆盖”和“同一意图网络重试”。二者不能相互
-替代。冲突应要求刷新并重新确认。
+`Idempotency-Key` 只解决同一远端意图的网络重试，不防止过期页面覆盖 Host 配置。Host mutation 在单进程
+内按 Host 串行，但这不等于乐观并发控制。若未来增加 revision，必须同时定义数据库 compare-and-swap、
+HTTP precondition、409、Web 刷新和并发测试；当前不能依赖该能力。
 
 ## 6.7 Credential 生命周期
 
-Secret 进入请求后立即按当前 envelope 加密；解密只在连接使用期间。修改 Host credential 是新的持久
-操作/状态变更，并写审计摘要，但不记录旧值或新值。
+Host credential 在写入数据库前按当前 envelope 加密，读取 Host 响应只暴露 `password_set`。修改 Host
+记录是本地数据库事务，并非 durable remote operation；同一事务会写不含 Secret 的 `audit_logs`。Host
+CRUD 没有 `audit_outbox` 外部投递闭包，因此需要集中审计 sink 的环境仍应在代理/调用侧补充管理事件。
 
 ## 6.8 故障定位
 

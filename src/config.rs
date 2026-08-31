@@ -21,7 +21,7 @@ pub struct ServeConfig {
     pub secrets: SecretBox,
     pub cover_url_policy: CoverUrlPolicy,
     pub cover_proxy: CoverProxy,
-    pub bootstrap_admin_email: String,
+    pub bootstrap_admin_username: String,
     pub bootstrap_admin_password: Option<String>,
     pub static_dir: PathBuf,
 }
@@ -64,6 +64,11 @@ impl ServeConfig {
             ),
             Err(error) => return Err(error.into()),
         };
+        let bootstrap_admin_username = crate::auth::normalize_administrator_username(&value(
+            "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_USERNAME",
+            "admin",
+        ))
+        .map_err(|error| anyhow::anyhow!(error))?;
 
         Ok(Self {
             bind,
@@ -80,10 +85,7 @@ impl ServeConfig {
             )?,
             cover_url_policy,
             cover_proxy,
-            bootstrap_admin_email: value(
-                "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL",
-                "admin@example.com",
-            ),
+            bootstrap_admin_username,
             bootstrap_admin_password: env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD").ok(),
             static_dir,
         })

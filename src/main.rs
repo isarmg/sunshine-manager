@@ -48,7 +48,7 @@ struct AdminResetPasswordArgs {
     #[arg(long, hide_env_values = true)]
     database_url: String,
     #[arg(long)]
-    email: String,
+    username: String,
     #[arg(long, hide_env_values = true)]
     password: String,
 }
@@ -82,20 +82,27 @@ async fn main() -> anyhow::Result<()> {
         Command::AdminCreate(args) => {
             let maintenance = MaintenanceLock::exclusive(&args.database_url)?;
             let pool = db::open_or_initialize(&maintenance.database_url()).await?;
-            let email = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL")
-                .unwrap_or_else(|_| "admin@example.com".to_string());
+            let username = sunshine_manager::auth::normalize_administrator_username(
+                &std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_USERNAME")
+                    .unwrap_or_else(|_| "admin".to_string()),
+            )?;
             let password = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD").ok();
-            db::ensure_admin_user(&pool, &email, password.as_deref()).await?;
-            println!("{{\"status\":\"admin-ready\",\"email\":{email:?}}}");
+            anyhow::ensure!(
+                db::ensure_admin_user(&pool, &username, password.as_deref()).await?,
+                "admin-create only initializes a database with no administrator"
+            );
+            println!("{{\"status\":\"admin-ready\",\"username\":{username:?}}}");
             Ok(())
         }
         Command::AdminResetPassword(args) => {
             let maintenance = MaintenanceLock::exclusive(&args.database_url)?;
             let pool = db::open_existing(&maintenance.database_url()).await?;
-            db::reset_admin_password(&pool, &args.email, &args.password).await?;
+            let username =
+                sunshine_manager::auth::normalize_administrator_username(&args.username)?;
+            db::reset_admin_password(&pool, &username, &args.password).await?;
             println!(
-                "{{\"status\":\"password-reset\",\"email\":{:?}}}",
-                args.email
+                "{{\"status\":\"password-reset\",\"username\":{:?}}}",
+                username
             );
             Ok(())
         }
@@ -146,9 +153,10 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
     // external restore, upgrade, and administrator maintenance.
     let application_lock = ApplicationLock::acquire(&config.database_url)?;
     let pool = db::open_or_initialize(&application_lock.database_url()).await?;
+    db::require_current_runtime_state(&pool, &config.secrets).await?;
     db::ensure_admin_user(
         &pool,
-        &config.bootstrap_admin_email,
+        &config.bootstrap_admin_username,
         config.bootstrap_admin_password.as_deref(),
     )
     .await?;

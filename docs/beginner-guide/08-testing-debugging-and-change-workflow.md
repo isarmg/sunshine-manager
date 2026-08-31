@@ -4,9 +4,9 @@
 
 ```bash
 cargo +1.98.0 fmt --all -- --check
-cargo +1.98.0 check --locked --all-targets
-cargo +1.98.0 clippy --locked --all-targets -- -D warnings
-cargo +1.98.0 test --locked
+cargo +1.98.0 check --locked --target x86_64-unknown-linux-gnu --all-targets
+cargo +1.98.0 clippy --locked --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+cargo +1.98.0 test --locked --target x86_64-unknown-linux-gnu
 cd clients/web
 npm ci
 npm run build
@@ -18,16 +18,17 @@ npm run build
 ## 8.2 调试层次
 
 release/config -> database/key/lock -> Session/CSRF -> operation persistence -> worker queue -> Sunshine
-network/API -> terminal/outbox -> Web。request ID 与 operation ID 跨层关联。
+network/API -> terminal/outbox -> Web。operation ID 是产品内持久关联键；Foundation error 中的 request ID
+虽为可选字段，但当前 Server 不生成，不能把它作为排障前提。
 
 ## 8.3 认证测试
 
-测试未知账户等成本、Argon2 并发、body 限制、Session idle/absolute TTL、登出、CSRF、Origin/Host、可信
-代理和 Secret redaction。
+测试未知账户等成本、Argon2 并发、body 限制、Session idle/absolute TTL、登出、CSRF、Origin/Host、
+forwarded header 被忽略/transport peer 作为来源和 Secret redaction。
 
 ## 8.4 Operation 测试
 
-测试幂等、revision、per-Host 串行、不同 Host 公平、所有网络断点、重启 unknown 和审计 outbox。不要只
+测试幂等、两个 HKDF/HMAC 域的稳定/隔离/换 key/非裸 SHA、Host 后写覆盖的当前语义、per-Host 串行、不同 Host 公平、所有网络断点、重启 unknown 和审计 outbox。不要只
 mock “200 OK”。
 
 ## 8.5 封面测试
@@ -42,10 +43,11 @@ manifest extra/missing/tamper、symlink/hardlink/mode 和重定位。
 
 ## 8.7 变更联动
 
-API 同步 Rust/Web/测试；Schema/crypto 同步 identity/doctor/升级仓；release 同步打包器/运行时/部署；名称
-同步 package/binary/config/docs。删除旧入口，不做 dual read/write。
+API 同步 Rust/Web/测试；Schema/crypto 同步 identity/doctor，并仅在升级仓新增经评审的具体 adapter/edge；
+release 同步打包器/运行时/部署；名称同步 package/binary/config/docs。替换当前合同时删除被替代入口，
+不做 dual read/write。
 
 ## 8.8 提交前
 
-全文与路径搜索旧身份为零；文档链接/命令有效；没有 Secret、数据库、dist/node_modules/target；完整门禁
+全文与路径搜索非当前产品身份为零；文档链接/命令有效；没有 Secret、数据库、dist/node_modules/target；完整门禁
 通过；每个大问题单独提交便于审计和回滚。

@@ -4,7 +4,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::{
     auth::{InternalAuth, IssuedSession},
-    crypto::SecretBox,
+    crypto::{SecretBox, constant_time_equal_32},
     error::{AppError, AppResult},
     model::{Host, HostPatchRequest, HostSaveRequest, normalize_host, validate_host_request},
 };
@@ -52,16 +52,8 @@ impl DoctorReport {
 /// probe row or contacting any configured Sunshine host.
 pub async fn doctor(pool: &SqlitePool, secrets: &SecretBox) -> DoctorReport {
     let schema_ready = ready(pool).await;
-    let integrity_ready = sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
-        .fetch_one(pool)
-        .await
-        .map(|value| value.eq_ignore_ascii_case("ok"))
-        .unwrap_or(false);
-    let foreign_keys_ready = sqlx::query("PRAGMA foreign_key_check")
-        .fetch_optional(pool)
-        .await
-        .map(|row| row.is_none())
-        .unwrap_or(false);
+    let integrity_ready = sarmg_sqlite::integrity_check(pool).await.is_ok();
+    let foreign_keys_ready = sarmg_sqlite::foreign_key_check(pool).await.is_ok();
     let writable = schema_ready && doctor_write_probe(pool).await.is_ok();
     let encrypted_values_ready = schema_ready
         && validate_encrypted_values(pool, secrets)
@@ -101,9 +93,10 @@ async fn doctor_write_probe(pool: &SqlitePool) -> anyhow::Result<()> {
 async fn validate_encrypted_values(pool: &SqlitePool, secrets: &SecretBox) -> anyhow::Result<bool> {
     let mut host_cursor = String::new();
     loop {
-        let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT host_id,secret FROM hosts \
-             WHERE secret IS NOT NULL AND host_id > ? ORDER BY host_id LIMIT 128",
+        let rows = sqlx::query_as::<_, StoredHost>(
+            r#"SELECT host_id,name,address,web_port,username,secret,position,
+                      created_at_micros,updated_at_micros
+               FROM hosts WHERE host_id > ? ORDER BY host_id LIMIT 128"#,
         )
         .bind(&host_cursor)
         .fetch_all(pool)
@@ -111,18 +104,32 @@ async fn validate_encrypted_values(pool: &SqlitePool, secrets: &SecretBox) -> an
         if rows.is_empty() {
             break;
         }
-        for (_, ciphertext) in &rows {
-            if secrets.decrypt(ciphertext).is_err() {
+        for row in &rows {
+            let Ok(host) = decode_host(row.clone(), secrets) else {
+                return Ok(false);
+            };
+            let request = HostSaveRequest {
+                name: host.name.clone(),
+                host: host.host.clone(),
+                web_port: host.web_port,
+                username: host.username.clone(),
+                password: Some(host.password),
+            };
+            if host.name != host.name.trim()
+                || host.host != normalize_host(&host.host)
+                || host.username != host.username.trim()
+                || validate_host_request(&request).is_err()
+            {
                 return Ok(false);
             }
         }
-        host_cursor = rows.last().expect("non-empty batch").0.clone();
+        host_cursor = rows.last().expect("non-empty batch").host_id.clone();
     }
 
     let mut operation_cursor = String::new();
     loop {
-        let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT operation_id,request_ciphertext FROM operations \
+        let rows = sqlx::query_as::<_, (String, String, Vec<u8>, String)>(
+            "SELECT operation_id,action,request_fingerprint,request_ciphertext FROM operations \
              WHERE operation_id > ? ORDER BY operation_id LIMIT 128",
         )
         .bind(&operation_cursor)
@@ -131,11 +138,21 @@ async fn validate_encrypted_values(pool: &SqlitePool, secrets: &SecretBox) -> an
         if rows.is_empty() {
             break;
         }
-        for (_, ciphertext) in &rows {
-            let Ok(plaintext) = secrets.decrypt(ciphertext) else {
+        for (operation_id, action, fingerprint, ciphertext) in &rows {
+            let Ok(plaintext) = secrets.decrypt_operation_request(operation_id, action, ciphertext)
+            else {
                 return Ok(false);
             };
-            if serde_json::from_str::<serde_json::Value>(&plaintext).is_err() {
+            let expected_fingerprint = secrets.operation_request_fingerprint(&plaintext);
+            if !constant_time_equal_32(fingerprint, &expected_fingerprint) {
+                return Ok(false);
+            }
+            let Ok(request) =
+                serde_json::from_str::<crate::operations::RemoteOperationRequest>(&plaintext)
+            else {
+                return Ok(false);
+            };
+            if request.action() != action.as_str() {
                 return Ok(false);
             }
         }
@@ -144,51 +161,78 @@ async fn validate_encrypted_values(pool: &SqlitePool, secrets: &SecretBox) -> an
     Ok(true)
 }
 
+/// Require the complete current runtime state before the network listener is
+/// opened. Schema identity alone cannot prove that SQLite pages, foreign-key
+/// relationships, or every persisted authenticated ciphertext are usable with
+/// the one configured credential key.
+pub async fn require_current_runtime_state(
+    pool: &SqlitePool,
+    secrets: &SecretBox,
+) -> anyhow::Result<()> {
+    sarmg_sqlite::integrity_check(pool).await?;
+    sarmg_sqlite::foreign_key_check(pool).await?;
+    anyhow::ensure!(
+        validate_encrypted_values(pool, secrets).await?,
+        "persisted ciphertext or its record context is not valid under the current credential key"
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 #[allow(dead_code)]
 pub struct StoredUser {
     pub user_id: String,
-    pub email: String,
+    pub username: String,
     pub password_hash: String,
     pub active: bool,
     pub session_version: i64,
 }
 
-pub async fn find_active_user_by_email(
+pub async fn find_active_user_by_username(
     pool: &SqlitePool,
-    email: &str,
+    username: &str,
 ) -> AppResult<Option<StoredUser>> {
-    let normalized = email.trim().to_lowercase();
+    let normalized = crate::auth::normalize_administrator_username(username)?;
     let row = sqlx::query_as::<_, StoredUser>(
-        "SELECT user_id,email,password_hash,active,session_version FROM auth_users \
-         WHERE email=? AND active=true",
+        "SELECT user_id,username,password_hash,active,session_version FROM auth_users \
+         WHERE username=? AND active=true",
     )
-    .bind(normalized)
+    .bind(&normalized)
     .fetch_optional(pool)
     .await?;
+    if let Some(user) = &row {
+        sarmg_admin_auth::require_canonical_administrator_username(&user.username)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+        sarmg_admin_auth::require_current_password_hash(&user.password_hash)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    }
     Ok(row)
 }
 
 pub async fn ensure_admin_user(
     pool: &SqlitePool,
-    email: &str,
+    username: &str,
     password: Option<&str>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
+    // The configured bootstrap identity is part of the current configuration
+    // contract even after initialization, so never let an invalid value become
+    // an ignored startup fallback.
+    let normalized = crate::auth::normalize_administrator_username(username)?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_users")
         .fetch_one(pool)
         .await?;
     if count > 0 {
-        return Ok(());
+        validate_stored_administrator_users(pool).await?;
+        return Ok(false);
     }
     let password = password.ok_or_else(|| {
         AppError::BadRequest(
             "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD is required while no users exist".into(),
         )
     })?;
-    let normalized = email.trim().to_lowercase();
     let password_hash = crate::auth::hash_password(password)?;
     sqlx::query(
-        "INSERT INTO auth_users(user_id,email,password_hash,active,created_at_micros) \
+        "INSERT INTO auth_users(user_id,username,password_hash,active,created_at_micros) \
          VALUES(?,?,?,true,?)",
     )
     .bind(uuid::Uuid::new_v4().to_string())
@@ -197,38 +241,60 @@ pub async fn ensure_admin_user(
     .bind(now_micros()?)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(true)
 }
 
-pub async fn reset_admin_password(pool: &SqlitePool, email: &str, password: &str) -> AppResult<()> {
-    let normalized = email.trim().to_lowercase();
+pub async fn reset_admin_password(
+    pool: &SqlitePool,
+    username: &str,
+    password: &str,
+) -> AppResult<()> {
+    let normalized = crate::auth::normalize_administrator_username(username)?;
+    validate_stored_administrator_users(pool).await?;
     let password_hash = crate::auth::hash_password(password)?;
     let now = now_micros()?;
     let mut transaction = pool.begin().await?;
     let result = sqlx::query(
         "UPDATE auth_users \
          SET password_hash=?, session_version=session_version+1 \
-         WHERE email=?",
+         WHERE username=?",
     )
     .bind(password_hash)
-    .bind(normalized)
+    .bind(&normalized)
     .execute(&mut *transaction)
     .await?;
     if result.rows_affected() != 1 {
         return Err(AppError::NotFound(format!(
-            "no active or existing user matched {email}"
+            "no existing user matched {normalized}"
         )));
     }
     sqlx::query(
         "UPDATE auth_sessions SET revoked_at_micros=? \
-         WHERE user_id=(SELECT user_id FROM auth_users WHERE email=?) \
+         WHERE user_id=(SELECT user_id FROM auth_users WHERE username=?) \
            AND revoked_at_micros IS NULL",
     )
     .bind(now)
-    .bind(email.trim().to_lowercase())
+    .bind(&normalized)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
+    Ok(())
+}
+
+/// Every persisted administrator must satisfy the one current Foundation
+/// identity and Argon2id policy before the worker starts serving requests.
+async fn validate_stored_administrator_users(pool: &SqlitePool) -> AppResult<()> {
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT username,password_hash FROM auth_users ORDER BY user_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (username, password_hash) in rows {
+        sarmg_admin_auth::require_canonical_administrator_username(&username)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+        sarmg_admin_auth::require_current_password_hash(&password_hash)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    }
     Ok(())
 }
 
@@ -236,7 +302,7 @@ pub async fn reset_admin_password(pool: &SqlitePool, email: &str, password: &str
 pub struct StoredSession {
     pub session_id: String,
     pub user_id: String,
-    pub email: String,
+    pub username: String,
     pub csrf_hash: Vec<u8>,
     pub absolute_expires_at_micros: i64,
 }
@@ -298,7 +364,7 @@ pub async fn authenticate_session(
     now_micros: i64,
 ) -> AppResult<Option<StoredSession>> {
     let session = sqlx::query_as::<_, StoredSession>(
-        r#"SELECT s.session_id,s.user_id,u.email,s.csrf_hash,s.absolute_expires_at_micros
+        r#"SELECT s.session_id,s.user_id,u.username,s.csrf_hash,s.absolute_expires_at_micros
            FROM auth_sessions s
            JOIN auth_users u ON u.user_id=s.user_id
            WHERE s.token_hash=?
@@ -345,6 +411,37 @@ pub async fn revoke_session(pool: &SqlitePool, session_id: &str, now_micros: i64
     .bind(session_id)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Replace the one-use browser CSRF secret after a successful session
+/// restoration. The plaintext is returned only by the HTTP layer; SQLite
+/// retains the Foundation SHA-256 token digest.
+pub async fn rotate_session_csrf(
+    pool: &SqlitePool,
+    session_id: &str,
+    csrf_hash: &[u8],
+    now_micros: i64,
+) -> AppResult<()> {
+    let updated = sqlx::query(
+        "UPDATE auth_sessions SET csrf_hash=? \
+         WHERE session_id=? AND revoked_at_micros IS NULL \
+           AND idle_expires_at_micros>? AND absolute_expires_at_micros>? \
+           AND EXISTS ( \
+               SELECT 1 FROM auth_users u \
+               WHERE u.user_id=auth_sessions.user_id AND u.active=true \
+                 AND u.session_version=auth_sessions.user_session_version \
+           )",
+    )
+    .bind(csrf_hash)
+    .bind(session_id)
+    .bind(now_micros)
+    .bind(now_micros)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::Unauthorized);
+    }
     Ok(())
 }
 
@@ -595,7 +692,7 @@ pub(crate) fn encode_host(host: &Host, secrets: &SecretBox) -> AppResult<StoredH
         web_port: i32::from(host.web_port),
         username: host.username.clone(),
         secret: (!host.password.is_empty())
-            .then(|| secrets.encrypt(&host.password))
+            .then(|| secrets.encrypt_host_credential(&host.id, &host.password))
             .transpose()?,
         position: host.position,
         created_at_micros: host.created_at_micros,
@@ -604,6 +701,12 @@ pub(crate) fn encode_host(host: &Host, secrets: &SecretBox) -> AppResult<StoredH
 }
 
 pub(crate) fn decode_host(row: StoredHost, secrets: &SecretBox) -> AppResult<Host> {
+    let password = row
+        .secret
+        .as_deref()
+        .map(|value| secrets.decrypt_host_credential(&row.host_id, value))
+        .transpose()?
+        .unwrap_or_default();
     Ok(Host {
         id: row.host_id,
         name: row.name,
@@ -611,11 +714,7 @@ pub(crate) fn decode_host(row: StoredHost, secrets: &SecretBox) -> AppResult<Hos
         web_port: u16::try_from(row.web_port)
             .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid stored web_port")))?,
         username: row.username,
-        password: row
-            .secret
-            .map(|value| secrets.decrypt(&value))
-            .transpose()?
-            .unwrap_or_default(),
+        password,
         position: row.position,
         created_at_micros: row.created_at_micros,
         updated_at_micros: row.updated_at_micros,
@@ -680,6 +779,8 @@ mod tests {
                 name: Some("Living Room".into()),
                 host: Some("192.0.2.20".into()),
                 web_port: Some(48_000),
+                // This is the upstream Sunshine Basic Auth username, not a
+                // Sunshine Manager role or administrator identity.
                 username: Some("operator".into()),
                 password: Some("rotated-secret".into()),
             },
@@ -756,6 +857,9 @@ mod tests {
 
         let report = doctor(&pool, &secrets).await;
         assert!(report.healthy(), "{report:?}");
+        require_current_runtime_state(&pool, &secrets)
+            .await
+            .unwrap();
         let audit_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
             .fetch_one(&pool)
             .await
@@ -768,6 +872,94 @@ mod tests {
         assert!(!report.encrypted_values_ready);
         assert!(report.schema_ready && report.integrity_ready && report.foreign_keys_ready);
         assert!(report.writable);
+        assert!(
+            require_current_runtime_state(&pool, &wrong_key)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_host_ciphertext_moved_to_another_record() {
+        let pool = current_pool().await;
+        let secrets = SecretBox::new("doctor", [19; 32]).unwrap();
+        let first = insert_host(
+            &pool,
+            &secrets,
+            HostSaveRequest {
+                name: "First Host".into(),
+                host: "192.0.2.91".into(),
+                web_port: 47_990,
+                username: "sunshine".into(),
+                password: Some("first-secret".into()),
+            },
+            "test-user",
+        )
+        .await
+        .unwrap();
+        let second = insert_host(
+            &pool,
+            &secrets,
+            HostSaveRequest {
+                name: "Second Host".into(),
+                host: "192.0.2.92".into(),
+                web_port: 47_990,
+                username: "sunshine".into(),
+                password: Some("second-secret".into()),
+            },
+            "test-user",
+        )
+        .await
+        .unwrap();
+        let first_ciphertext: String =
+            sqlx::query_scalar("SELECT secret FROM hosts WHERE host_id=?")
+                .bind(&first.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("UPDATE hosts SET secret=? WHERE host_id=?")
+            .bind(first_ciphertext)
+            .bind(&second.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            get_host(&pool, &secrets, &second.id).await,
+            Err(AppError::Crypto)
+        ));
+        assert!(!doctor(&pool, &secrets).await.encrypted_values_ready);
+        assert!(
+            require_current_runtime_state(&pool, &secrets)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn administrator_username_is_persisted_and_looked_up_canonically() {
+        let pool = current_pool().await;
+        assert!(
+            ensure_admin_user(&pool, " Admin.Ops ", Some("correct horse battery staple"),)
+                .await
+                .unwrap()
+        );
+
+        let stored: String = sqlx::query_scalar("SELECT username FROM auth_users")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "admin.ops");
+        assert_eq!(
+            find_active_user_by_username(&pool, " ADMIN.OPS ")
+                .await
+                .unwrap()
+                .unwrap()
+                .username,
+            "admin.ops"
+        );
+        assert!(!ensure_admin_user(&pool, "ignored", None).await.unwrap());
+        assert!(ensure_admin_user(&pool, "admin@local", None).await.is_err());
     }
 
     #[tokio::test]
@@ -839,14 +1031,10 @@ mod tests {
     #[tokio::test]
     async fn password_reset_invalidates_existing_database_sessions() {
         let pool = current_pool().await;
-        ensure_admin_user(
-            &pool,
-            "admin@example.com",
-            Some("correct horse battery staple"),
-        )
-        .await
-        .unwrap();
-        let user = find_active_user_by_email(&pool, "admin@example.com")
+        ensure_admin_user(&pool, "admin", Some("correct horse battery staple"))
+            .await
+            .unwrap();
+        let user = find_active_user_by_username(&pool, "admin")
             .await
             .unwrap()
             .unwrap();
@@ -862,13 +1050,9 @@ mod tests {
                 .is_some()
         );
 
-        reset_admin_password(
-            &pool,
-            "admin@example.com",
-            "another correct horse battery staple",
-        )
-        .await
-        .unwrap();
+        reset_admin_password(&pool, "admin", "another correct horse battery staple")
+            .await
+            .unwrap();
         assert!(
             authenticate_session(&pool, &auth, &issued.token_hash, now)
                 .await
@@ -882,5 +1066,25 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(revoked, 1);
+    }
+
+    #[tokio::test]
+    async fn persisted_administrators_must_use_the_current_foundation_policy() {
+        let pool = current_pool().await;
+        ensure_admin_user(&pool, "admin", Some("correct horse battery staple"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE auth_users SET password_hash='not-a-current-hash'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(ensure_admin_user(&pool, "admin", None).await.is_err());
+        assert!(find_active_user_by_username(&pool, "admin").await.is_err());
+        assert!(
+            reset_admin_password(&pool, "admin", "another correct horse battery staple")
+                .await
+                .is_err()
+        );
     }
 }

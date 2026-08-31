@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import re
 import shutil
 import socket
@@ -26,6 +27,25 @@ TAG = f"v{VERSION}"
 
 def fail(message: str) -> NoReturn:
     raise SystemExit(f"package release: {message}")
+
+
+def require_release_host() -> None:
+    """Require the native platform used by the release verification smoke test."""
+    try:
+        gnu_libc = os.confstr("CS_GNU_LIBC_VERSION")
+    except (AttributeError, OSError, ValueError):
+        gnu_libc = None
+    if (
+        platform.system() != "Linux"
+        or platform.machine() != "x86_64"
+        or gnu_libc is None
+        or not gnu_libc.startswith("glibc ")
+    ):
+        fail(
+            "official Server releases require an x86_64 GNU/Linux build host; "
+            f"detected system={platform.system()!r}, machine={platform.machine()!r}, "
+            f"libc={gnu_libc!r}"
+        )
 
 
 def run(
@@ -117,7 +137,7 @@ def relocated_smoke(extracted: Path, temporary: Path) -> None:
             "SUNSHINE_MANAGER_STATIC_DIR": os.fspath(extracted / "web"),
             "SUNSHINE_MANAGER_BIND": f"127.0.0.1:{port}",
             "SUNSHINE_MANAGER_PRODUCTION": "false",
-            "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_EMAIL": "release-smoke@example.invalid",
+            "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_USERNAME": "release-smoke",
             "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD": "release-smoke-password",
         }
     )
@@ -203,6 +223,7 @@ def relocated_smoke(extracted: Path, temporary: Path) -> None:
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: package-release.py /absolute/output-directory")
+    require_release_host()
     source = Path(__file__).resolve(strict=True).parent.parent
     output_directory = Path(sys.argv[1])
     if not output_directory.is_absolute():
@@ -267,14 +288,18 @@ def main() -> None:
                 "SUNSHINE_MANAGER_SOURCE_REVISION": revision,
             }
         )
-        run(["cargo", "build", "--locked", "--release"], cwd=source, env=build_environment)
-        built_binary = cargo_target / "release/sunshine-manager"
+        run(
+            ["cargo", "build", "--locked", "--release", "--target", TARGET],
+            cwd=source,
+            env=build_environment,
+        )
+        built_binary = cargo_target / TARGET / "release/sunshine-manager"
         if not built_binary.is_file() or built_binary.is_symlink():
             fail("Cargo did not produce the expected release binary")
 
         shutil.copyfile(built_binary, root / "bin/sunshine-manager")
         shutil.copyfile(
-            source / "systemd/sunshine-manager.service",
+            source / "deploy/sunshine-manager.service",
             root / "systemd/sunshine-manager.service",
         )
         shutil.copyfile(source / "docs/operations.md", root / "README.md")

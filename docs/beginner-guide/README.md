@@ -32,8 +32,9 @@ src/cover_policy.rs               外部封面 URL 准入
 src/cover_proxy.rs                一次性内部封面代理
 src/db.rs / database_schema.rs    当前 SQLite 与 doctor
 src/release_*.rs                  binary/release manifest 合同
-clients/web/                              当前 React 管理控制台
-deploy/ + systemd/                发行和服务模板
+clients/web/                      当前 React/Vite 管理控制台
+config/                           源码内运行配置模板
+deploy/                           正式服务模板
 ```
 
 ## 3. 开发准备
@@ -41,7 +42,7 @@ deploy/ + systemd/                发行和服务模板
 需要 Rust `1.98.0` 与 Web lockfile 对应的 Node/npm：
 
 ```bash
-cargo +1.98.0 check --locked --all-targets
+cargo +1.98.0 check --locked --target x86_64-unknown-linux-gnu --all-targets
 cd clients/web && npm ci && npm run build
 ```
 
@@ -58,13 +59,26 @@ cargo run -- serve
 
 登录使用本地管理员账户和 Argon2。成功后服务端创建随机 Session 与 CSRF Token，只在 SQLite 保存其
 SHA-256 摘要。写请求必须同时满足有效 Cookie、Session 绑定的 `X-CSRF-Token` 和匹配的 Origin/Host。
-登录请求受 body 大小、来源、账户与全局 Argon2 并发/超时限制；未知用户也执行同参数 Hash 工作。
+登录请求受 body 大小、来源、账户与进程级 Argon2 并发/超时限制；未知用户也执行同参数 Hash 工作。管理
+身份只有 Foundation 定义的 `admin`，数据库没有角色列，也没有 viewer/operator 授权分支。
+
+当前内置 Web 的产品范围是管理员登录、Session 恢复/退出和 Host 只读概览。Host CRUD、客户端、应用、
+配置、封面与 operation 管理由同源 `/api/v2` 提供，但尚未在内置 Web 中实现交互页面；文档不会把 Server
+route 错写成已经存在的按钮或表单。
 
 ## 5. 主机凭据
 
 Sunshine Host 密码及未完成操作请求使用当前 `SUNSHINE_MANAGER_CREDENTIAL_KEY` 加密。数据库只保存
-密文和 key ID。运行时只接受一个当前 key，不保留 previous key；换 key/重新加密是外部离线升级操作。
-数据库副本没有对应 external key 时不是可用备份。
+密文和 key ID。AES-256-GCM 的 AAD 还认证数据用途和记录身份：Host password 绑定 Host ID/`secret`
+字段域，operation request 绑定 operation ID/action/`request_ciphertext` 字段域。因此不能把一行的合法密文
+复制到另一行或另一字段；即使 key、nonce/ciphertext/tag 和 `sunshine:v1:` 前缀本身均合法也会认证失败。
+运行时只接受一个当前 key，不尝试其他 key，也不尝试空 AAD。当前没有换 key/重新加密或恢复实现；未来
+只有 `sarmg-upgrade` 明确登记的具体 edge 才能承担转换。数据库副本没有对应 external key 时不可使用，
+即使二者都有也不代表当前存在受支持恢复流程。
+
+Operation 的 request fingerprint 和 Idempotency-Key 数据库查找值也不能使用裸 SHA-256：同一 master key
+经 HKDF-SHA-256 用两个不同 info 派生两把 32-byte key，再分别计算 HMAC-SHA-256。这样数据库副本不能用
+已知 JSON 模板离线枚举低熵 PIN，也不能用字典直接识别幂等键；两个域即使输入字节相同，结果也不同。
 
 ## 6. 为什么远端写入是异步操作
 
@@ -85,16 +99,17 @@ Sunshine Host 密码及未完成操作请求使用当前 `SUNSHINE_MANAGER_CREDE
 
 ## 8. SQLite 与单实例
 
-一个数据库只允许一个活跃进程。进程全生命周期持有 instance 排他锁，maintenance 共享锁允许外部
-一致性在线备份；恢复、升级和管理员维护需要排他锁。Linux 使用 `openat2` 锚定父目录，拒绝 symlink、
-特殊文件和硬链接 alias。
+一个数据库只允许一个活跃进程。进程全生命周期持有 instance 排他锁和 maintenance shared；管理员
+离线维护需要 maintenance exclusive。Linux 使用 `openat2` 锚定父目录，拒绝 symlink、特殊文件和硬链接
+alias。锁协议为未来外部工具保留安全边界，但当前没有 Sunshine backup/restore/upgrade edge。
 
 数据库只在文件不存在时创建当前 Schema。元数据、版本、revision 和重新计算的 DDL SHA-256 必须全
-匹配；旧库、空文件或漂移只读拒绝。
+匹配。已有库的 main/WAL/journal 会先复制成稳定私有代际，在副本上由 SQLite 校验；源 SHM 只检查普通
+文件与单链接身份，所以非当前库、空文件或漂移会在不改写源数据库及 sidecar 字节的前提下拒绝。
 
 ## 9. 修改代码的方法
 
-- API 修改同步 Rust、Web 与 `/api/v2` 测试，不添加旧 alias。
+- API 修改同步 Rust、Web 与 `/api/v2` 测试，不添加平行 alias。
 - 远端 mutation 必须进入 durable operation，不能在请求 handler 直接执行后宣称原子。
 - Secret 不能进入状态响应、audit、日志或 upstream error body。
 - cover 变化必须保留 allowlist、两次解析边界、pin、no redirect、大小与 MIME 限制。
@@ -108,3 +123,9 @@ Sunshine Host 密码及未完成操作请求使用当前 `SUNSHINE_MANAGER_CREDE
 - **SSRF**：服务端被诱导访问内部/敏感网络资源。
 - **outbox**：与业务事务一起写入、可在重启后继续投递的审计事件队列。
 - **source-bound**：二进制身份包含构建源码完整 revision。
+
+## 11. 平台边界
+
+正式 Server binary 与随发行树提供的内置 Web 只支持 Linux AMD64
+（`x86_64-unknown-linux-gnu`）。受管 Sunshine Host、Moonlight 客户端及其协议是外部端，继续保持原有
+平台范围；Node lockfile 中构建工具的可选平台包也不代表本项目发布其他 Server target。

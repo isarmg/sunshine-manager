@@ -8,12 +8,16 @@ Sunshine 可能执行请求后在响应前断线。Manager 无法安全断言“
 ## 5.2 状态
 
 `pending` 等待执行；`running` 已由 worker claim；`succeeded` 可证明达到目标；`failed` 可证明拒绝/未执行；
-`unknown` 无法证明副作用。终态不会因页面刷新而消失。
+`unknown` 无法证明副作用；`dead_letter` 表示允许人工安全重试的动作已达到 `max_attempts`；`resolved`
+只追加管理员核验结论。终态不会因页面刷新而消失。
 
 ## 5.3 幂等键
 
-同 actor/Host/action/key 和规范请求 Hash 决定唯一 operation。完全相同请求返回原 operation；不同请求
-复用 key 返回 409。客户端应在一次用户意图的网络重试中保留 key。
+同 actor/Host/action/key 和规范请求 fingerprint 决定唯一 operation。完全相同请求返回原 operation；不同请求
+复用 key 返回 409。这里的两个数据库摘要并非裸 Hash：credential master key 经 HKDF-SHA-256 使用独立
+info 派生 request-fingerprint key 与 idempotency-key-hash key，再分别计算 HMAC-SHA-256。请求 fingerprint
+用 constant-time 比较，Idempotency-Key HMAC 作为 SQLite 精确 BLOB 查找键；不尝试裸 SHA-256 fallback。
+客户端应在一次用户意图的网络重试中保留 key。
 
 ## 5.4 Per-Host 串行
 
@@ -22,18 +26,23 @@ Sunshine 可能执行请求后在响应前断线。Manager 无法安全断言“
 
 ## 5.5 Worker 流程
 
-claim pending，解密并再次验证请求/credential，构造有界远端调用，根据可证明结果分类，再用事务写终态
-和 completion outbox。外部调用期间不持有 SQLite 写事务。
+claim pending，以 operation ID/action/字段域 AAD 认证解密 request，再以 Host ID/字段域 AAD 认证解密
+credential，把请求解析为严格当前 enum 并核对持久 action；任何跨 operation、跨 action 或跨 Host 密文
+调换都会在远端调用前成为 `request_corrupt` 或本地状态不可用。封面 URL 还会在执行期重新执行网络策略。
+其他字段边界依赖入队前验证与严格 enum，不宣称 worker 重复所有 HTTP 校验。
+随后构造有界远端调用，根据可证明结果分类，再用事务写终态和 completion outbox。外部调用期间不持有
+SQLite 写事务。
 
 ## 5.6 重启
 
-启动扫描 pending 继续；遗留 running 一律转 unknown，因为旧进程可能已完成远端调用。禁止启动时自动
+启动扫描 pending 继续；中断留下的 running 一律转 unknown，因为退出前可能已完成远端调用。禁止启动时自动
 重放 running 来追求“最终成功”。
 
 ## 5.7 Outbox
 
-审计事件与业务事务同时写入 outbox，投递失败可按稳定 ID 重试。Secret 和远端正文先做最小安全投影，
-不能因为 outbox 受保护就保存不必要敏感数据。
+审计事件与业务事务同时写入 outbox，再按稳定 ID 幂等物化到同一 SQLite 的 `audit_logs`。进程或数据库
+错误后后台循环继续处理；当前没有外部 audit sink。Secret 和远端正文先做最小安全投影，不能因为 outbox
+受保护就保存不必要敏感数据。
 
 ## 5.8 Unknown 处置
 

@@ -229,8 +229,12 @@ mod tests {
         });
         assert!(serde_json::from_value::<HostSaveRequest>(current.clone()).is_ok());
 
-        let mut invalid = current;
+        let mut invalid = current.clone();
         invalid["unexpected"] = serde_json::Value::Bool(false);
         assert!(serde_json::from_value::<HostSaveRequest>(invalid).is_err());
+
+        let mut forbidden_tls_bypass = current;
+        forbidden_tls_bypass["verify_tls"] = serde_json::Value::Bool(false);
+        assert!(serde_json::from_value::<HostSaveRequest>(forbidden_tls_bypass).is_err());
     }
 }

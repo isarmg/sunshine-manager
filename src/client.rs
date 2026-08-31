@@ -19,6 +19,9 @@ pub struct UpstreamClient {
 
 impl UpstreamClient {
     pub fn new() -> anyhow::Result<Self> {
+        // Reqwest's default verifier is the only supported TLS path: it checks
+        // the platform trust chain, validity period and requested host name.
+        // There is intentionally no development or per-host bypass switch.
         Ok(Self {
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(3))
@@ -50,7 +53,7 @@ impl UpstreamClient {
         let response = request
             .send()
             .await
-            .map_err(|error| AppError::Upstream(format!("Sunshine request failed: {error}")))?;
+            .map_err(|_| AppError::Upstream("Sunshine request failed".into()))?;
         json_response(response).await
     }
 
@@ -173,7 +176,7 @@ impl UpstreamClient {
             .basic_auth(&host.username, Some(&host.password))
             .send()
             .await
-            .map_err(|error| AppError::Upstream(format!("Sunshine logs failed: {error}")))?;
+            .map_err(|_| AppError::Upstream("Sunshine logs request failed".into()))?;
         let status = response.status();
         let content_type = content_type(&response);
         let text = String::from_utf8(read_limited(response, MAX_JSON_BYTES).await?)
@@ -227,7 +230,7 @@ impl UpstreamClient {
             .basic_auth(&host.username, Some(&host.password))
             .send()
             .await
-            .map_err(|error| AppError::Upstream(format!("Sunshine cover failed: {error}")))?;
+            .map_err(|_| AppError::Upstream("Sunshine cover request failed".into()))?;
         let status = response.status();
         let content_type = content_type(&response);
         if !status.is_success() {
@@ -289,7 +292,7 @@ async fn read_limited(mut response: Response, limit: usize) -> AppResult<Vec<u8>
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| AppError::Upstream(format!("reading Sunshine response failed: {error}")))?
+        .map_err(|_| AppError::Upstream("reading Sunshine response failed".into()))?
     {
         if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(AppError::Upstream("Sunshine response is too large".into()));
@@ -316,23 +319,30 @@ fn ensure_status(status: StatusCode, body: &str) -> AppResult<()> {
     }
 }
 
-fn status_error(status: StatusCode, body: &str) -> AppError {
-    let detail = body
-        .chars()
-        .take(200)
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
+fn status_error(status: StatusCode, _body: &str) -> AppError {
+    // A Sunshine error body is an untrusted diagnostic channel and may contain
+    // credentials or host-local data. Callers may read it only under their body
+    // limit; this classifier deliberately retains none of it.
     if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        AppError::Forbidden(format!(
-            "Sunshine authentication failed (HTTP {status}: {detail})"
-        ))
+        AppError::Forbidden("Sunshine authentication failed".into())
     } else {
-        AppError::Upstream(format!("Sunshine returned HTTP {status}: {detail}"))
+        AppError::Upstream(format!("Sunshine returned HTTP {status}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_error_bodies_are_never_retained() {
+        let sensitive = "remote-secret\ncontrol";
+        let unauthorized = status_error(StatusCode::UNAUTHORIZED, sensitive).to_string();
+        assert_eq!(unauthorized, "Sunshine authentication failed");
+        assert!(!unauthorized.contains(sensitive));
+
+        let unavailable = status_error(StatusCode::SERVICE_UNAVAILABLE, sensitive).to_string();
+        assert!(unavailable.starts_with("Sunshine returned HTTP 503"));
+        assert!(!unavailable.contains(sensitive));
     }
 }

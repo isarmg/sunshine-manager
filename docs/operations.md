@@ -5,7 +5,7 @@
 ```text
 /opt/isarmg/sunshine-manager/releases/0.7.0/  root-owned read-only release
 /etc/isarmg/sunshine-manager.env             0600 environment
-/var/lib/isarmg/sunshine-manager/db/app.db   SQLite
+/var/lib/isarmg/sunshine-manager/db/sunshine-manager.sqlite3  SQLite
 /run/isarmg/sunshine-manager/                locks/runtime
 ```
 
@@ -27,6 +27,13 @@ asset 和 group/world writable 内容。
 python3 scripts/package-release.py /absolute/release-output
 ```
 
+构建输入还包括精确的 Sarmg Foundation 0.3.0 Rust 与 npm 包。六个 Rust crate 必须来自
+`https://github.com/isarmg/sarmg-foundation.git` 的完整 revision
+`1fe326081cfd896f05ff502e80f99504797c14c6`；四个 Web 包必须来自 GitHub Release `v0.3.0` 中各自的
+`sarmg-<name>-0.3.0.tgz`，并由 npm lockfile 的 SHA-512 integrity 固定内容。开发、CI 与正式构建使用同一
+不可变来源，不保留 sibling path/file 例外。Foundation 不是生产运行服务，发行树中不增加其 daemon、
+配置或 socket。
+
 输出已存在时拒绝覆盖。安装：
 
 ```bash
@@ -39,6 +46,9 @@ tar -xzf sunshine-manager-0.7.0-x86_64-unknown-linux-gnu.tar.gz \
 安装仓库内 systemd unit，创建专用账户、状态目录和 `/etc/isarmg/sunshine-manager.env`，再 enable/start。
 同版本不得合并或覆盖。
 
+正式归档只生成 `x86_64-unknown-linux-gnu` Server 与随附 Web。该限制不要求受管 Sunshine Host 或
+Moonlight 客户端使用 AMD64，也不改变 Sunshine 上游 API；它们仍是本控制面的外部端。
+
 ## 3. 环境配置
 
 | 变量 | 默认/要求 | 说明 |
@@ -46,9 +56,10 @@ tar -xzf sunshine-manager-0.7.0-x86_64-unknown-linux-gnu.tar.gz \
 | `SUNSHINE_MANAGER_DATABASE_URL` | 必填 | 当前 SQLite URL |
 | `..._BIND` | `127.0.0.1:18104` | 生产回环监听 |
 | `..._STATIC_DIR` | 必填固定 release Web | 不能是 symlink |
-| `..._CREDENTIAL_KEY_ID` | 当前 key ID | 与备份 manifest 一致 |
+| `..._CREDENTIAL_KEY_ID` | 当前 key ID | 必须与当前库中全部 envelope 一致 |
 | `..._CREDENTIAL_KEY` | Base64 32 字节 | 独立秘密管理，禁止日志/仓库 |
-| `..._BOOTSTRAP_ADMIN_*` | 首次库初始化 | 使用后轮换初始密码 |
+| `..._BOOTSTRAP_ADMIN_USERNAME` | `admin` | 1–64 字节 printable ASCII candidate；解析后必须得到 3–64 字节 canonical username |
+| `..._BOOTSTRAP_ADMIN_PASSWORD` | `auth_users` 为空时必填 | 12–1024 字节且无 ASCII control；使用后立即轮换初始密码 |
 | `..._SESSION_TTL_SECONDS` | 43200 | 绝对期限 |
 | `..._SESSION_IDLE_TTL_SECONDS` | 1800 | 空闲期限 |
 | `..._SESSION_COOKIE_SECURE` | 生产 true | 只通过 HTTPS |
@@ -63,36 +74,61 @@ sunshine-manager verify-release --root /opt/isarmg/sunshine-manager/releases/0.7
 sunshine-manager doctor
 sunshine-manager admin-create --database-url sqlite:///path/app.db
 sunshine-manager admin-reset-password --database-url sqlite:///path/app.db \
-  --email admin@example.com --password '<new-secret>'
+  --username admin --password '<new-secret>'
 ```
 
 管理员写命令需要 maintenance exclusive；先停服务。避免把真实密码留在 Shell history，使用受控 Secret
-注入或临时受保护终端。
+注入或临时受保护终端。`admin-create` 只允许数据库中尚无管理员时创建首个账户；已有管理员时它会拒绝，
+不会把“校验现有账户”伪装成新建成功。`admin-reset-password` 只接受 canonical 化后精确匹配的当前 username。
+
+管理员身份不是邮箱。登录候选必须为 1–64 个可打印 ASCII 字节；Server 只执行 `trim_ascii()` 和
+ASCII 小写化，然后要求持久值为 3–64 字节、首尾是字母/数字且字符只来自 `[a-z0-9._-]`。`@`、Unicode、
+控制字符和其他符号均拒绝；数据库 CHECK、启动存量检查、Session DTO、账户限流键和 Web 表单使用同一
+username。不存在 `EMAIL` 环境变量、`--email` 参数、JSON `email` 字段或兼容别名。
 
 ## 5. Doctor
 
 `doctor` 验证 product metadata、现场 Schema fingerprint、SQLite integrity/foreign keys、可回滚写事务，
-并用当前 key 解密全部 Host credential 和未完成 operation request。它不连接 Sunshine，也不保留写探针。
+并复验 Host 规范字段、用当前 key 认证全部 Host credential 和全部持久 operation request；operation
+plaintext 还必须能解析为当前严格 enum 且 action 与行一致。认证上下文必须精确匹配：Host 使用 Host ID
+和 `secret` 字段域，operation 使用 operation ID、action 和 `request_ciphertext` 字段域。密文被复制到另一
+记录、action 被修改、用途错误或使用空 AAD 时都失败；不会尝试旧格式或不带 AAD 的 fallback。它不连接
+Sunshine。扫描还会从已解密的每条 operation request 重算 HKDF 分域 HMAC-SHA-256 fingerprint 并用
+constant-time 比较；裸 SHA-256 或另一 master key 生成的 fingerprint 会使 doctor/启动失败。它不保留
+业务探针行；它不是纯只读命令，因为会执行随后回滚的写事务。
 
-若 Schema 不符，不得手改 metadata；若解密失败，先确认 key ID、key 文件来源和权限，不得添加旧 key
-fallback。
+其中 WAL/FULL synchronous/foreign-key/busy-timeout 连接基线、checkpoint、integrity/FK 和 Schema 指纹算法来自
+Foundation 0.3；数据库文件权限、main/WAL/journal 私有代际快照预检、DDL/init、失败清理、运行/maintenance
+锁仍由 Sunshine Manager 负责。预检只读取源 `-shm` 的类型与身份，不在源库上建立 SQLite 连接；因此非当前
+库拒绝不会改写 SHM 锁字节。故障定位时不要绕过任一层，也不要用 Foundation API 现场创建或转换非当前库。
+
+若 Schema 不符，不得手改 metadata；若解密失败，先确认 key ID、key 文件来源和权限，不得添加“尝试
+其他 key”、空 AAD 或忽略记录身份的 fallback。即使 envelope 仍以 `sunshine:v1:` 开头，也不能据此前缀
+判定它属于当前合同；AES-GCM tag 必须在当前确定性 AAD 下验证通过。
+同一 master key 除直接供 AES 使用外，还派生两把 HMAC key，但不会暴露通用 HMAC key API：request fingerprint
+和 Idempotency-Key hash 各有固定且不同的 HKDF info。换 master key 会同时改变密文可用性和两个 HMAC 域，
+不得手改 BLOB、回退裸 SHA-256 或尝试另一域的 key。
 
 ## 6. 反向代理和网络
 
-公网 TLS proxy 保留原 Host，并确保 Session Cookie Secure。应用端口只对 proxy 回环开放。Sunshine
-Host 地址由防火墙限制，优先使用 HTTPS 且验证证书。
+公网 TLS proxy 保留原 Host，并确保 Session Cookie Secure；同时由 proxy 设置经验证的 HSTS/CSP 等浏览器
+响应策略，Server 当前不终止浏览器 TLS 或注入这些 header。应用端口只对 proxy 回环开放。Sunshine
+Host 地址由防火墙限制。Manager 对每次 Sunshine 连接都强制使用 HTTPS，并验证证书链、有效期和主机名；
+这不是“优先项”，也没有开发或单 Host 绕过开关。私有 CA 必须先安全安装到服务进程实际使用的系统信任库。
 
 封面代理 origin 必须由 Sunshine Host 直接访问，不能把一次性路径经过公共 proxy；两端网络都要拒绝
 private/link-local/loopback/metadata egress 和危险 redirect。
 
-## 7. 备份、恢复、升级和换 key
+## 7. 当前连续性限制与外部升级边界
 
-产品没有相关写入实现。使用 `sarmg-upgrade`，一致性单元至少包含 SQLite generation 与 external
-credential key 身份。Sunshine 当前备份、验证和恢复都要求 `--credentials-key-id` 与受保护 key file，
-工具会认证所有密文后才发布或安装备份；原始 key bytes 不进入备份。
+Sunshine Manager 产品仓没有 backup、restore、Schema conversion、key rotation 或 re-encryption 命令。
+`sarmg-upgrade` 是这些能力的唯一所有者，但当前也没有登记 Sunshine 的具体历史 edge，因此本版本不能把
+文件复制、SQLite `.backup` 或手工换 key 描述为受支持的恢复/升级流程。数据库与 32-byte external key
+必须作为一个安全单元独立保全，这只是未来工具实现的必要条件，不是当前恢复承诺。
 
-在线一致性备份可取得 maintenance shared；恢复、版本升级和 re-encryption 必须停服务并取得 exclusive。
-定期在隔离环境演练，尤其验证 pending/unknown operation 和 Host 凭据。
+需要新环境时，创建全新的当前数据库和 current key，并由管理员重新登记 Host；不要把非当前库交给
+Server，也不要逐表复制。若未来实现 edge，必须在升级仓中显式声明来源/目标 identity、maintenance
+exclusive、全密文认证、临时 generation、原子安装、journal 与故障注入测试，产品仓仍不增加分支。
 
 ## 8. 监控与故障定位
 
@@ -103,9 +139,16 @@ credential key 身份。Sunshine 当前备份、验证和恢复都要求 `--cred
 5. 对封面错误检查 allowlist、DNS 的全部地址、MIME/大小、proxy origin 和 Host egress。
 6. 监控 SQLite/WAL、operation backlog、unknown 数量、磁盘和 inode。
 
+API 错误必须同时检查 HTTP status 与稳定 `code`；`message` 只用于展示。若 Web 报
+`invalid_error_response`，先检查代理是否改写 JSON/content-type 或服务端是否返回非当前错误形状；若为
+`invalid_response_shape`，说明 2xx 正文已偏离当前端点合同，不应在浏览器添加宽松分支。
+`request_id` 是 Foundation envelope 的可选字段，本版本 Server 不生成；需要链路关联时应由可信 proxy/
+日志平台生成并在其自身受保护日志中维护，不能伪造为产品当前 API 的必填字段。
+
 ## 9. 安全事件
 
-隔离公网和受影响 Sunshine Host，保全 release SHA、数据库 generation、审计和日志，轮换管理员 Session/
-密码、credential key、Sunshine 凭据、TLS key，并通过外部工具完成 re-encryption。使用 GitHub Private
+隔离公网和受影响 Sunshine Host，保全 release SHA、数据库 generation、审计和日志，撤销管理员 Session，
+并轮换管理员密码、Sunshine 凭据与 TLS key。credential key 一旦确认泄露，而升级仓又没有已审计的 re-encryption edge，
+应停用该数据库，建立全新当前数据库/key 并重新登记 Host，不能继续运行或自行批量改密文。使用 GitHub Private
 Vulnerability Reporting；公开 issue 不得包含生产 Host、数据库、密文、key、URL 或请求正文。只支持
 当前发布版本与当前 `main`。

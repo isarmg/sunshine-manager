@@ -1,5 +1,6 @@
 [Unit]
 Description=Sunshine Manager
+ConditionArchitecture=x86-64
 After=network-online.target
 Wants=network-online.target
 

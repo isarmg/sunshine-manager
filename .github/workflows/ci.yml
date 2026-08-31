@@ -8,6 +8,8 @@ on:
 permissions: {}
 
 env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
   RUSTUP_TOOLCHAIN: 1.98.0
 
 jobs:
@@ -28,14 +30,29 @@ jobs:
           python3 -m py_compile scripts/package-release.py scripts/write-release-manifest.py
       - name: Install exact Rust toolchain
         run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
+      - name: Enforce the Linux AMD64 Server target boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc -vV | grep -Fx 'host: x86_64-unknown-linux-gnu'
+          gate_binary="${RUNNER_TEMP}/sunshine-manager-build-gate"
+          gate_stderr="${RUNNER_TEMP}/sunshine-manager-build-gate.stderr"
+          rustc build.rs -o "$gate_binary"
+          if TARGET=aarch64-unknown-linux-gnu "$gate_binary" 2>"$gate_stderr"; then
+            echo 'Server build gate accepted an unsupported target.' >&2
+            exit 1
+          fi
+          grep -F \
+            'Sunshine Manager server supports only x86_64-unknown-linux-gnu' \
+            "$gate_stderr"
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Check all targets
-        run: cargo check --locked --all-targets
-      - name: Lint all targets
-        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Check the Server target
+        run: cargo check --locked --target x86_64-unknown-linux-gnu --all-targets
+      - name: Lint the Server target
+        run: cargo clippy --locked --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
       - name: Test Rust and manifest contract
-        run: cargo test --locked
+        run: cargo test --locked --target x86_64-unknown-linux-gnu
       - name: Install Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

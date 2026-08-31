@@ -3,20 +3,28 @@
   "private": true,
   "version": "0.7.0",
   "type": "module",
+  "engines": {
+    "node": ">=26.7.0 <27"
+  },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "check:foundation": "node scripts/check-foundation-toolchain.mjs",
+    "build": "npm run check:foundation && tsc -b && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "@sarmg/admin-web": "https://github.com/isarmg/sarmg-foundation/releases/download/v0.3.0/sarmg-admin-web-0.3.0.tgz",
+    "@sarmg/contracts": "https://github.com/isarmg/sarmg-foundation/releases/download/v0.3.0/sarmg-contracts-0.3.0.tgz",
+    "@sarmg/design-tokens": "https://github.com/isarmg/sarmg-foundation/releases/download/v0.3.0/sarmg-design-tokens-0.3.0.tgz",
+    "@sarmg/http-client": "https://github.com/isarmg/sarmg-foundation/releases/download/v0.3.0/sarmg-http-client-0.3.0.tgz",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6",
-    "@vitejs/plugin-react": "^4.7.0",
-    "typescript": "^5.8.3",
-    "vite": "^7.1.7"
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "4.7.0",
+    "typescript": "5.8.3",
+    "vite": "7.3.6"
   }
 }

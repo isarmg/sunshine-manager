@@ -1,13 +1,14 @@
 use anyhow::{Context, ensure};
+use sarmg_server_target::SERVER_TARGET_TRIPLE;
 use serde::{Deserialize, Serialize};
 
-use crate::database_schema::{APPLICATION, APPLICATION_VERSION, SCHEMA_REVISION, SCHEMA_SHA256};
+use crate::database_schema::{APPLICATION, APPLICATION_VERSION, current_schema_identity};
 
 pub const MANIFEST_FORMAT: &str = "sunshine-manager-release-v1";
 pub const API_NAMESPACE: &str = "/api";
 pub const API_VERSION_PREFIX: &str = "/v2";
 pub const API_PREFIX: &str = "/api/v2";
-pub const BUILD_TARGET: &str = env!("SUNSHINE_MANAGER_BUILD_TARGET");
+pub const BUILD_TARGET: &str = SERVER_TARGET_TRIPLE;
 pub const SOURCE_REVISION: &str = env!("SUNSHINE_MANAGER_SOURCE_REVISION");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,13 +38,15 @@ pub struct BinaryIdentity {
 
 impl ReleaseContract {
     pub fn current() -> Self {
+        let schema = current_schema_identity();
         Self {
             manifest_format: MANIFEST_FORMAT.to_owned(),
             application: APPLICATION.to_owned(),
             version: APPLICATION_VERSION.to_owned(),
             api_prefix: API_PREFIX.to_owned(),
-            schema_revision: SCHEMA_REVISION,
-            schema_sha256: SCHEMA_SHA256.to_owned(),
+            schema_revision: i64::try_from(schema.schema_revision)
+                .expect("current schema revision fits the release contract"),
+            schema_sha256: schema.schema_sha256,
             target: BUILD_TARGET.to_owned(),
         }
     }
@@ -104,11 +107,11 @@ mod tests {
     fn unknown_fields_and_other_versions_are_rejected() {
         let mut unknown: serde_json::Value =
             serde_json::from_str(include_str!("../release.json")).unwrap();
-        unknown["compatibility"] = serde_json::json!(true);
+        unknown["unknown_extension"] = serde_json::json!(true);
         assert!(parse_exact(&unknown.to_string()).is_err());
 
         let mut other = ReleaseContract::current();
-        other.version = "0.6.0".to_owned();
+        other.version = "0.0.0".to_owned();
         assert!(parse_exact(&serde_json::to_string(&other).unwrap()).is_err());
     }
 

@@ -28,17 +28,32 @@ local、multicast 和 metadata 段，并限制 DNS resolver 与 Sunshine Host �
 ## 7.6 API 合同
 
 当前 DTO 严格拒绝 unknown fields、非法枚举、超长 URL/文本和非规范 ID。Web 必须发送当前 `/api/v2`，
-服务端不解析另一种旧封面字段。
+服务端不解析其他封面字段形状。
 
 ## 7.7 Schema/密文合同
 
 当前数据库由 code-owned DDL fingerprint 与 metadata 双验证；credential 只接受当前 external key/envelope。
-封面 operation request 也属于需认证的持久密文，不能忽略 pending/running 行。
+当前 envelope 文本仍为 `sunshine:v1:<key-id>:<base64(nonce|ciphertext|tag)>`，但 GCM 认证输入不只有密文：
+代码用 `sunshine-manager:aes-256-gcm:aad:v1` 作为 AAD 格式域，并对每个组件使用 64-bit big-endian 长度分帧。
+Host credential 的组件为用途域 `host-credential`、Host ID、字段 `secret`；operation request 的组件为用途域
+`operation-request`、operation ID、action、字段 `request_ciphertext`。AAD 不另存数据库，而是由当前行身份
+确定性重建。空 AAD、错误字段域、行间复制、action 被改写或旧实现生成的同前缀密文一律认证失败；没有
+fallback。封面 operation request 也属于需认证的持久密文，启动必须扫描所有状态而非只看 pending/running。
+
+同一 external master key 还以固定 salt `sunshine-manager:credential-master-key:hkdf-sha256:v1` 进入
+HKDF-SHA-256。request fingerprint 的 info 是
+`sunshine-manager:operation-request-fingerprint:hmac-sha256:v1`，Idempotency-Key 数据库 hash 的 info 是
+`sunshine-manager:operation-idempotency-key-hash:hmac-sha256:v1`；每个输出是独立的 32-byte HMAC-SHA-256
+key。两个持久值仍为 32-byte BLOB，因此 DDL/SHA 不变；裸 SHA-256、另一域的 HMAC 或另一 master key
+生成的值均不是当前合同。启动可用已解密 request 重算并认证 fingerprint；Idempotency-Key 本身不持久化，
+其 HMAC 只作为 `(actor,host,action,key)` 唯一索引中的精确 BLOB。
 
 ## 7.8 测试负例
 
 覆盖 DNS 多地址、重绑定、IPv4-mapped IPv6、redirect、超大 Content-Length/stream、MIME 欺骗、慢响应、
 一次性重放、过期、错误 Host/operation 和 forwarded peer spoof。
+密文合同还要覆盖篡改、空 AAD、跨 Host/operation/action/字段调换；HMAC 合同覆盖同值稳定、跨域不同、
+换 master key 不同、低熵输入不等于裸 SHA-256、非 32-byte 拒绝和启动全量复算。
 
 ## 7.9 变更原则
 
