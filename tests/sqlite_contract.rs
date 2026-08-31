@@ -60,9 +60,30 @@ fn assert_snapshot_unchanged(before: &[(String, Vec<u8>)], after: &[(String, Vec
     assert_eq!(summarize(after), summarize(before));
 }
 
-fn mutate(path: &Path, sql: &str) {
+fn assert_live_wal(snapshot: &[(String, Vec<u8>)], database: &Path) {
+    let name = database.file_name().unwrap().to_string_lossy();
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = format!("{name}{suffix}");
+        assert!(
+            snapshot
+                .iter()
+                .any(|(entry, bytes)| entry == &sidecar && !bytes.is_empty()),
+            "fixture did not retain live SQLite sidecar {sidecar}"
+        );
+    }
+}
+
+fn mutate_while_holding_connection(path: &Path, sql: &str) -> rusqlite::Connection {
     let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+        .unwrap();
     connection.execute_batch(sql).unwrap();
+    // Keep the only writer open through the rejection assertion. In WAL mode,
+    // dropping the final connection is itself allowed to checkpoint the main
+    // database and remove WAL/SHM files; attributing that independent close to
+    // the read-only preflight would make this byte-preservation test racy.
+    connection
 }
 
 #[tokio::test]
@@ -127,57 +148,76 @@ async fn exact_current_schema_is_durable_and_self_identifying() {
 
 #[tokio::test]
 async fn empty_unknown_schema_noncurrent_version_and_drift_are_read_only_rejections() {
-    let directory = tempfile::tempdir().unwrap();
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let empty = directory.path().join("empty.sqlite3");
+        fs::File::create(&empty).unwrap();
+        let before = stable_directory_snapshot(directory.path());
+        assert!(db::open_or_initialize(&database_url(&empty)).await.is_err());
+        assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
+    }
 
-    let empty = directory.path().join("empty.sqlite3");
-    fs::File::create(&empty).unwrap();
-    let before = stable_directory_snapshot(directory.path());
-    assert!(db::open_or_initialize(&database_url(&empty)).await.is_err());
-    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let unknown_schema = directory.path().join("unknown-schema.sqlite3");
+        let connection = mutate_while_holding_connection(
+            &unknown_schema,
+            "CREATE TABLE unknown_data(id INTEGER PRIMARY KEY)",
+        );
+        let before = stable_directory_snapshot(directory.path());
+        assert_live_wal(&before, &unknown_schema);
+        assert!(
+            db::open_or_initialize(&database_url(&unknown_schema))
+                .await
+                .is_err()
+        );
+        assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
+        connection.close().unwrap();
+    }
 
-    let unknown_schema = directory.path().join("unknown-schema.sqlite3");
-    mutate(
-        &unknown_schema,
-        "CREATE TABLE unknown_data(id INTEGER PRIMARY KEY)",
-    );
-    let before = stable_directory_snapshot(directory.path());
-    assert!(
-        db::open_or_initialize(&database_url(&unknown_schema))
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let wrong_version = directory.path().join("wrong-version.sqlite3");
+        let pool = db::open_or_initialize(&database_url(&wrong_version))
             .await
-            .is_err()
-    );
-    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
+            .unwrap();
+        pool.close().await;
+        drop(pool);
+        let connection = mutate_while_holding_connection(
+            &wrong_version,
+            "UPDATE product_metadata SET application_version='0.0.0'",
+        );
+        let before = stable_directory_snapshot(directory.path());
+        assert_live_wal(&before, &wrong_version);
+        assert!(
+            db::open_or_initialize(&database_url(&wrong_version))
+                .await
+                .is_err()
+        );
+        assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
+        connection.close().unwrap();
+    }
 
-    let wrong_version = directory.path().join("wrong-version.sqlite3");
-    let pool = db::open_or_initialize(&database_url(&wrong_version))
-        .await
-        .unwrap();
-    pool.close().await;
-    mutate(
-        &wrong_version,
-        "UPDATE product_metadata SET application_version='0.0.0'",
-    );
-    let before = stable_directory_snapshot(directory.path());
-    assert!(
-        db::open_or_initialize(&database_url(&wrong_version))
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let drifted = directory.path().join("drifted.sqlite3");
+        let pool = db::open_or_initialize(&database_url(&drifted))
             .await
-            .is_err()
-    );
-    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
-
-    let drifted = directory.path().join("drifted.sqlite3");
-    let pool = db::open_or_initialize(&database_url(&drifted))
-        .await
-        .unwrap();
-    pool.close().await;
-    mutate(&drifted, "CREATE TABLE unexpected(id INTEGER)");
-    let before = stable_directory_snapshot(directory.path());
-    assert!(
-        db::open_or_initialize(&database_url(&drifted))
-            .await
-            .is_err()
-    );
-    assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
+            .unwrap();
+        pool.close().await;
+        drop(pool);
+        let connection =
+            mutate_while_holding_connection(&drifted, "CREATE TABLE unexpected(id INTEGER)");
+        let before = stable_directory_snapshot(directory.path());
+        assert_live_wal(&before, &drifted);
+        assert!(
+            db::open_or_initialize(&database_url(&drifted))
+                .await
+                .is_err()
+        );
+        assert_snapshot_unchanged(&before, &stable_directory_snapshot(directory.path()));
+        connection.close().unwrap();
+    }
 }
 
 #[cfg(unix)]
