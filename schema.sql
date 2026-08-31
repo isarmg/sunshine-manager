@@ -9,7 +9,6 @@ CREATE TABLE hosts (
     username           TEXT NOT NULL
                             CHECK (length(trim(username)) BETWEEN 1 AND 256),
     secret             TEXT,
-    verify_tls         INTEGER NOT NULL CHECK (verify_tls IN (0, 1)),
     position           INTEGER NOT NULL CHECK (position >= 0),
     created_at_micros  INTEGER NOT NULL,
     updated_at_micros  INTEGER NOT NULL,

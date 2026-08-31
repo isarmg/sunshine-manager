@@ -38,7 +38,6 @@ pub struct WorkerState {
     pub pool: SqlitePool,
     pub secrets: SecretBox,
     pub auth: InternalAuth,
-    pub production: bool,
     upstream: UpstreamClient,
     health: Arc<RwLock<HashMap<String, HealthSnapshot>>>,
     operations: OperationManager,
@@ -54,7 +53,6 @@ impl WorkerState {
         pool: SqlitePool,
         secrets: SecretBox,
         auth: InternalAuth,
-        production: bool,
         static_dir: PathBuf,
     ) -> anyhow::Result<Self> {
         let dummy_password_hash =
@@ -65,7 +63,6 @@ impl WorkerState {
         let operations = OperationManager::new(
             pool.clone(),
             secrets.clone(),
-            production,
             mutation_locks,
             upstream.clone(),
         );
@@ -73,7 +70,6 @@ impl WorkerState {
             pool,
             secrets,
             auth,
-            production,
             upstream,
             health: Arc::new(RwLock::new(HashMap::new())),
             operations,
@@ -375,14 +371,7 @@ async fn create_host(
     Extension(identity): Extension<InternalIdentity>,
     Json(request): Json<HostSaveRequest>,
 ) -> AppResult<(StatusCode, Json<HostInfo>)> {
-    let host = db::insert_host(
-        &state.pool,
-        &state.secrets,
-        request,
-        state.production,
-        &identity.subject,
-    )
-    .await?;
+    let host = db::insert_host(&state.pool, &state.secrets, request, &identity.subject).await?;
     state
         .health
         .write()
@@ -398,15 +387,8 @@ async fn update_host(
     Json(request): Json<HostPatchRequest>,
 ) -> AppResult<Json<HostInfo>> {
     let _guard = state.operations.lock_host(&id).await;
-    let host = db::update_host(
-        &state.pool,
-        &state.secrets,
-        &id,
-        request,
-        state.production,
-        &identity.subject,
-    )
-    .await?;
+    let host =
+        db::update_host(&state.pool, &state.secrets, &id, request, &identity.subject).await?;
     state
         .health
         .write()
@@ -824,13 +806,7 @@ fn idempotency_key(headers: &HeaderMap) -> AppResult<&str> {
 }
 
 async fn load_host(state: &WorkerState, id: &str) -> AppResult<Host> {
-    let host = db::get_host(&state.pool, &state.secrets, id).await?;
-    if state.production && !host.verify_tls {
-        return Err(AppError::BadRequest(
-            "this host must enable TLS verification before use".into(),
-        ));
-    }
-    Ok(host)
+    db::get_host(&state.pool, &state.secrets, id).await
 }
 
 fn host_info(host: &Host, health: Option<&HealthSnapshot>) -> HostInfo {
@@ -843,7 +819,6 @@ fn host_info(host: &Host, health: Option<&HealthSnapshot>) -> HostInfo {
         web_port: host.web_port,
         username: host.username.clone(),
         password_set: !host.password.is_empty(),
-        verify_tls: host.verify_tls,
         web_url: web_url(host),
         probe_status: if complete {
             ProbeStatus::Complete
@@ -957,7 +932,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_static_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("clients/web")
     }
 
     async fn test_router() -> Router {
@@ -976,7 +951,6 @@ mod tests {
                 false,
             )
             .unwrap(),
-            true,
             test_static_dir(),
         )
         .unwrap();
@@ -1096,7 +1070,6 @@ mod tests {
                 false,
             )
             .unwrap(),
-            false,
             test_static_dir(),
         )
         .unwrap();
@@ -1234,9 +1207,7 @@ mod tests {
                 web_port: 47_990,
                 username: "sunshine".into(),
                 password: Some("upstream-secret".into()),
-                verify_tls: false,
             },
-            false,
             "bootstrap",
         )
         .await
@@ -1250,7 +1221,6 @@ mod tests {
                 false,
             )
             .unwrap(),
-            false,
             test_static_dir(),
         )
         .unwrap();

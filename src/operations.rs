@@ -158,7 +158,6 @@ impl RemoteOperationRequest {
 pub struct OperationManager {
     pool: SqlitePool,
     secrets: SecretBox,
-    production: bool,
     locks: HostMutationLocks,
     executor: Arc<dyn RemoteOperationExecutor>,
     notify: Arc<Notify>,
@@ -170,14 +169,12 @@ impl OperationManager {
     pub fn new(
         pool: SqlitePool,
         secrets: SecretBox,
-        production: bool,
         locks: HostMutationLocks,
         upstream: UpstreamClient,
     ) -> Self {
         Self {
             pool,
             secrets,
-            production,
             locks,
             executor: Arc::new(SunshineExecutor {
                 transport: Arc::new(UpstreamMutationTransport { upstream }),
@@ -250,12 +247,7 @@ impl OperationManager {
             return compare_existing(existing, &request_fingerprint);
         }
 
-        let host = db::get_host(&self.pool, &self.secrets, host_id).await?;
-        if self.production && !host.verify_tls {
-            return Err(AppError::BadRequest(
-                "this host must enable TLS verification before use".into(),
-            ));
-        }
+        db::get_host(&self.pool, &self.secrets, host_id).await?;
         let ciphertext = self.secrets.encrypt(&plaintext)?;
         let operation_id = format!("op_{}", Uuid::new_v4());
         let outbox_id = format!("out_{}", Uuid::new_v4());
@@ -651,9 +643,6 @@ impl OperationManager {
             Err(AppError::NotFound(_)) => return ExecutionOutcome::Failed("host_not_found"),
             Err(_) => return ExecutionOutcome::Failed("local_state_unavailable"),
         };
-        if self.production && !host.verify_tls {
-            return ExecutionOutcome::Failed("tls_verification_required");
-        }
         if let RemoteOperationRequest::CoverUpload { url, .. } = &mut request {
             let cover = match self.cover_url_policy.download(url).await {
                 Ok(cover) => cover,
@@ -1214,7 +1203,6 @@ mod tests {
         let manager = OperationManager::new(
             pool.clone(),
             secrets.clone(),
-            false,
             HostMutationLocks::default(),
             UpstreamClient::new().unwrap(),
         )
@@ -1232,9 +1220,7 @@ mod tests {
                 web_port: 47_990,
                 username: "sunshine".into(),
                 password: Some("upstream-password".into()),
-                verify_tls: false,
             },
-            false,
             ACTOR,
         )
         .await
@@ -1607,7 +1593,6 @@ mod tests {
         let restarted = OperationManager::new(
             reopened.clone(),
             secrets,
-            false,
             HostMutationLocks::default(),
             UpstreamClient::new().unwrap(),
         )

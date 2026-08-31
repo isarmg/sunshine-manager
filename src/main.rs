@@ -156,7 +156,6 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
         pool,
         config.secrets,
         config.internal_auth,
-        config.production,
         config.static_dir,
     )?
     .with_cover_delivery(config.cover_url_policy, config.cover_proxy);

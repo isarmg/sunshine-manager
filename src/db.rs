@@ -20,7 +20,6 @@ pub(crate) struct StoredHost {
     pub web_port: i32,
     pub username: String,
     pub secret: Option<String>,
-    pub verify_tls: bool,
     pub position: i64,
     pub created_at_micros: i64,
     pub updated_at_micros: i64,
@@ -351,7 +350,7 @@ pub async fn revoke_session(pool: &SqlitePool, session_id: &str, now_micros: i64
 
 pub async fn list_hosts(pool: &SqlitePool, secrets: &SecretBox) -> AppResult<Vec<Host>> {
     let rows = sqlx::query_as::<_, StoredHost>(
-        r#"SELECT host_id,name,address,web_port,username,secret,verify_tls,position,
+        r#"SELECT host_id,name,address,web_port,username,secret,position,
                   created_at_micros,updated_at_micros
            FROM hosts
            ORDER BY position,created_at_micros,host_id"#,
@@ -374,10 +373,9 @@ pub async fn insert_host(
     pool: &SqlitePool,
     secrets: &SecretBox,
     request: HostSaveRequest,
-    production: bool,
     actor: &str,
 ) -> AppResult<Host> {
-    validate_host_request(&request, production)?;
+    validate_host_request(&request)?;
     let now = now_micros()?;
     let mut transaction = pool.begin().await?;
     let position: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM hosts")
@@ -390,7 +388,6 @@ pub async fn insert_host(
         web_port: request.web_port,
         username: request.username.trim().to_string(),
         password: request.password.unwrap_or_default(),
-        verify_tls: request.verify_tls,
         position,
         created_at_micros: now,
         updated_at_micros: now,
@@ -403,8 +400,8 @@ pub async fn insert_host(
         &host.id,
         actor,
         Some(&format!(
-            "name={} host={} port={} verify_tls={}",
-            host.name, host.host, host.web_port, host.verify_tls
+            "name={} host={} port={}",
+            host.name, host.host, host.web_port
         )),
     )
     .await?;
@@ -417,7 +414,6 @@ pub async fn update_host(
     secrets: &SecretBox,
     id: &str,
     patch: HostPatchRequest,
-    production: bool,
     actor: &str,
 ) -> AppResult<Host> {
     if patch.is_empty() {
@@ -446,20 +442,13 @@ pub async fn update_host(
     if let Some(value) = patch.password {
         host.password = value;
     }
-    if let Some(value) = patch.verify_tls {
-        host.verify_tls = value;
-    }
-    validate_host_request(
-        &HostSaveRequest {
-            name: host.name.clone(),
-            host: host.host.clone(),
-            web_port: host.web_port,
-            username: host.username.clone(),
-            password: update_password.then(|| host.password.clone()),
-            verify_tls: host.verify_tls,
-        },
-        production,
-    )?;
+    validate_host_request(&HostSaveRequest {
+        name: host.name.clone(),
+        host: host.host.clone(),
+        web_port: host.web_port,
+        username: host.username.clone(),
+        password: update_password.then(|| host.password.clone()),
+    })?;
     host.updated_at_micros = now_micros()?;
     let mut stored = encode_host(&host, secrets)?;
     if !update_password {
@@ -472,8 +461,8 @@ pub async fn update_host(
         &host.id,
         actor,
         Some(&format!(
-            "name={} host={} port={} verify_tls={}",
-            host.name, host.host, host.web_port, host.verify_tls
+            "name={} host={} port={}",
+            host.name, host.host, host.web_port
         )),
     )
     .await?;
@@ -509,7 +498,7 @@ pub(crate) async fn get_stored_host(
     id: &str,
 ) -> Result<Option<StoredHost>, sqlx::Error> {
     sqlx::query_as::<_, StoredHost>(
-        r#"SELECT host_id,name,address,web_port,username,secret,verify_tls,position,
+        r#"SELECT host_id,name,address,web_port,username,secret,position,
                   created_at_micros,updated_at_micros
            FROM hosts WHERE host_id=?"#,
     )
@@ -523,7 +512,7 @@ pub(crate) async fn get_stored_host_for_update(
     id: &str,
 ) -> Result<Option<StoredHost>, sqlx::Error> {
     sqlx::query_as::<_, StoredHost>(
-        r#"SELECT host_id,name,address,web_port,username,secret,verify_tls,position,
+        r#"SELECT host_id,name,address,web_port,username,secret,position,
                   created_at_micros,updated_at_micros
            FROM hosts WHERE host_id=?"#,
     )
@@ -538,9 +527,9 @@ pub(crate) async fn insert_stored(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO hosts(
-               host_id,name,address,web_port,username,secret,verify_tls,position,
+               host_id,name,address,web_port,username,secret,position,
                created_at_micros,updated_at_micros)
-           VALUES(?,?,?,?,?,?,?,?,?,?)"#,
+           VALUES(?,?,?,?,?,?,?,?,?)"#,
     )
     .bind(&row.host_id)
     .bind(&row.name)
@@ -548,7 +537,6 @@ pub(crate) async fn insert_stored(
     .bind(row.web_port)
     .bind(&row.username)
     .bind(&row.secret)
-    .bind(row.verify_tls)
     .bind(row.position)
     .bind(row.created_at_micros)
     .bind(row.updated_at_micros)
@@ -563,7 +551,7 @@ pub(crate) async fn update_stored(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"UPDATE hosts SET name=?,address=?,web_port=?,username=?,
-             secret=?,verify_tls=?,position=?,updated_at_micros=?
+             secret=?,position=?,updated_at_micros=?
            WHERE host_id=?"#,
     )
     .bind(&row.name)
@@ -571,7 +559,6 @@ pub(crate) async fn update_stored(
     .bind(row.web_port)
     .bind(&row.username)
     .bind(&row.secret)
-    .bind(row.verify_tls)
     .bind(row.position)
     .bind(row.updated_at_micros)
     .bind(&row.host_id)
@@ -610,7 +597,6 @@ pub(crate) fn encode_host(host: &Host, secrets: &SecretBox) -> AppResult<StoredH
         secret: (!host.password.is_empty())
             .then(|| secrets.encrypt(&host.password))
             .transpose()?,
-        verify_tls: host.verify_tls,
         position: host.position,
         created_at_micros: host.created_at_micros,
         updated_at_micros: host.updated_at_micros,
@@ -630,7 +616,6 @@ pub(crate) fn decode_host(row: StoredHost, secrets: &SecretBox) -> AppResult<Hos
             .map(|value| secrets.decrypt(&value))
             .transpose()?
             .unwrap_or_default(),
-        verify_tls: row.verify_tls,
         position: row.position,
         created_at_micros: row.created_at_micros,
         updated_at_micros: row.updated_at_micros,
@@ -673,9 +658,7 @@ mod tests {
                 web_port: 47_990,
                 username: "sunshine".into(),
                 password: Some("initial-secret".into()),
-                verify_tls: false,
             },
-            false,
             "test-user",
         )
         .await
@@ -699,9 +682,7 @@ mod tests {
                 web_port: Some(48_000),
                 username: Some("operator".into()),
                 password: Some("rotated-secret".into()),
-                verify_tls: Some(false),
             },
-            false,
             "test-user",
         )
         .await
@@ -763,9 +744,7 @@ mod tests {
                 web_port: 47_990,
                 username: "sunshine".into(),
                 password: Some("doctor-secret".into()),
-                verify_tls: false,
             },
-            false,
             "test-user",
         )
         .await
@@ -831,9 +810,7 @@ mod tests {
                 web_port: 47_990,
                 username: "sunshine".into(),
                 password: Some("persistent-secret".into()),
-                verify_tls: false,
             },
-            false,
             "test-user",
         )
         .await

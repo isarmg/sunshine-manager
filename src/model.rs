@@ -11,7 +11,6 @@ pub struct Host {
     pub username: String,
     #[serde(skip_serializing)]
     pub password: String,
-    pub verify_tls: bool,
     pub position: i64,
     pub created_at_micros: i64,
     pub updated_at_micros: i64,
@@ -32,7 +31,6 @@ pub struct HostInfo {
     pub web_port: u16,
     pub username: String,
     pub password_set: bool,
-    pub verify_tls: bool,
     pub web_url: String,
     pub probe_status: ProbeStatus,
     pub reachable: Option<bool>,
@@ -64,7 +62,6 @@ pub struct HostSaveRequest {
     pub web_port: u16,
     pub username: String,
     pub password: Option<String>,
-    pub verify_tls: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -75,7 +72,6 @@ pub struct HostPatchRequest {
     pub web_port: Option<u16>,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub verify_tls: Option<bool>,
 }
 
 impl HostPatchRequest {
@@ -85,7 +81,6 @@ impl HostPatchRequest {
             && self.web_port.is_none()
             && self.username.is_none()
             && self.password.is_none()
-            && self.verify_tls.is_none()
     }
 }
 
@@ -138,7 +133,7 @@ impl OperationResolution {
     }
 }
 
-pub fn validate_host_request(request: &HostSaveRequest, production: bool) -> AppResult<()> {
+pub fn validate_host_request(request: &HostSaveRequest) -> AppResult<()> {
     validate_text("host name", &request.name, 128)?;
     validate_text("username", &request.username, 256)?;
     if request
@@ -157,11 +152,6 @@ pub fn validate_host_request(request: &HostSaveRequest, production: bool) -> App
     }
     if !is_valid_host(&request.host) {
         return Err(AppError::BadRequest("invalid Sunshine host".to_string()));
-    }
-    if production && !request.verify_tls {
-        return Err(AppError::BadRequest(
-            "production requires Sunshine TLS certificate verification".to_string(),
-        ));
     }
     Ok(())
 }
@@ -215,20 +205,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_rejects_insecure_or_invalid_hosts() {
+    fn rejects_invalid_hosts() {
         let mut request = HostSaveRequest {
             name: "desktop".into(),
             host: "2001:db8::1".into(),
             web_port: 47990,
             username: "admin".into(),
             password: Some("secret".into()),
-            verify_tls: true,
         };
-        assert!(validate_host_request(&request, true).is_ok());
-        request.verify_tls = false;
-        assert!(validate_host_request(&request, true).is_err());
-        request.verify_tls = true;
+        assert!(validate_host_request(&request).is_ok());
         request.host = "not a host".into();
-        assert!(validate_host_request(&request, true).is_err());
+        assert!(validate_host_request(&request).is_err());
+    }
+
+    #[test]
+    fn host_contract_rejects_unknown_fields() {
+        let current = serde_json::json!({
+            "name": "desktop",
+            "host": "sunshine.example.com",
+            "web_port": 47990,
+            "username": "admin",
+            "password": "secret"
+        });
+        assert!(serde_json::from_value::<HostSaveRequest>(current.clone()).is_ok());
+
+        let mut invalid = current;
+        invalid["unexpected"] = serde_json::Value::Bool(false);
+        assert!(serde_json::from_value::<HostSaveRequest>(invalid).is_err());
     }
 }

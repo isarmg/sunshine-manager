@@ -18,7 +18,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 pub const APPLICATION: &str = "sunshine-manager";
 pub const APPLICATION_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SCHEMA_REVISION: i64 = 1;
-pub const SCHEMA_SHA256: &str = "8618a2ac77bb67378bdcca3af390c711e64e742c5d81d04072c98845bdc9f4df";
+pub const SCHEMA_SHA256: &str = "a8e2fe3c3a9a59a9a36979bcef3628299832d02078e421953ab78e0c0900d5a7";
 
 const CURRENT_SCHEMA_SQL: &str = include_str!("../schema.sql");
 const PRODUCT_METADATA_DDL: &str = "CREATE TABLE product_metadata (\n\
@@ -281,7 +281,7 @@ fn validate_metadata(metadata: &[ProductMetadata]) -> anyhow::Result<()> {
             && metadata.application_version == APPLICATION_VERSION
             && metadata.schema_revision == SCHEMA_REVISION
             && metadata.schema_sha256 == SCHEMA_SHA256,
-        "database metadata is not the exact current Sunshine Manager version; use isarmg-upgrade"
+        "database metadata is not the exact current Sunshine Manager version; use sarmg-upgrade"
     );
     Ok(())
 }
@@ -289,7 +289,7 @@ fn validate_metadata(metadata: &[ProductMetadata]) -> anyhow::Result<()> {
 fn validate_fingerprint(metadata: &ProductMetadata, actual: &str) -> anyhow::Result<()> {
     ensure!(
         metadata.schema_sha256 == SCHEMA_SHA256 && actual == SCHEMA_SHA256,
-        "database schema is not the exact current Sunshine Manager schema; use isarmg-upgrade"
+        "database schema is not the exact current Sunshine Manager schema; use sarmg-upgrade"
     );
     Ok(())
 }

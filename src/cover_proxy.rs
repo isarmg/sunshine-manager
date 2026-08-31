@@ -188,7 +188,6 @@ mod tests {
             web_port: 47990,
             username: "admin".into(),
             password: "secret".into(),
-            verify_tls: true,
             position: 0,
             created_at_micros: 1,
             updated_at_micros: 1,

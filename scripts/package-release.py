@@ -244,10 +244,12 @@ def main() -> None:
         for directory in [root / "bin", root / "systemd", web_stage]:
             directory.mkdir(parents=True, exist_ok=False)
 
-        run(["npm", "ci"], cwd=source / "web")
+        # clients/web is the sole browser-client source; the release still exposes
+        # the compiled, immutable tree at runtime path web/.
+        run(["npm", "ci"], cwd=source / "clients/web")
         run(
             ["npm", "run", "build", "--", "--outDir", os.fspath(web_stage), "--emptyOutDir"],
-            cwd=source / "web",
+            cwd=source / "clients/web",
         )
         if sorted(path.name for path in web_stage.iterdir()) != ["assets", "index.html"]:
             fail("Web build is not the exact current assets/index.html layout")
@@ -275,7 +277,7 @@ def main() -> None:
             source / "systemd/sunshine-manager.service",
             root / "systemd/sunshine-manager.service",
         )
-        shutil.copyfile(source / "deploy/RELEASE-README.md", root / "README.md")
+        shutil.copyfile(source / "docs/operations.md", root / "README.md")
         shutil.copytree(web_stage, root / "web", copy_function=shutil.copyfile)
 
         executable_paths = [root / "bin/sunshine-manager"]

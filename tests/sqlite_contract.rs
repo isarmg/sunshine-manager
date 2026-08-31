@@ -97,9 +97,9 @@ async fn exact_current_schema_is_durable_and_self_identifying() {
 
     sqlx::query(
         "INSERT INTO hosts(\
-           host_id,name,address,web_port,username,secret,verify_tls,position,\
+           host_id,name,address,web_port,username,secret,position,\
            created_at_micros,updated_at_micros\
-         ) VALUES('persistent','Persistent','192.0.2.1',47990,'sunshine',NULL,0,0,1,1)",
+         ) VALUES('persistent','Persistent','192.0.2.1',47990,'sunshine',NULL,0,1,1)",
     )
     .execute(&pool)
     .await

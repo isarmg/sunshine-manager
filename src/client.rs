@@ -14,30 +14,18 @@ const MAX_ITEMS: usize = 512;
 
 #[derive(Clone)]
 pub struct UpstreamClient {
-    verified: reqwest::Client,
-    insecure: reqwest::Client,
+    client: reqwest::Client,
 }
 
 impl UpstreamClient {
     pub fn new() -> anyhow::Result<Self> {
-        let common = || {
-            reqwest::Client::builder()
+        Ok(Self {
+            client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(3))
                 .timeout(Duration::from_secs(15))
                 .redirect(reqwest::redirect::Policy::none())
-        };
-        Ok(Self {
-            verified: common().build()?,
-            insecure: common().danger_accept_invalid_certs(true).build()?,
+                .build()?,
         })
-    }
-
-    fn for_host(&self, host: &Host) -> &reqwest::Client {
-        if host.verify_tls {
-            &self.verified
-        } else {
-            &self.insecure
-        }
     }
 
     async fn json(
@@ -49,7 +37,7 @@ impl UpstreamClient {
         authenticated: bool,
     ) -> AppResult<Value> {
         let mut request = self
-            .for_host(host)
+            .client
             .request(method, format!("{}{path}", web_url(host)));
         if authenticated {
             request = request.basic_auth(&host.username, Some(&host.password));
@@ -180,7 +168,7 @@ impl UpstreamClient {
 
     pub async fn logs(&self, host: &Host) -> AppResult<Value> {
         let response = self
-            .for_host(host)
+            .client
             .get(format!("{}/api/logs", web_url(host)))
             .basic_auth(&host.username, Some(&host.password))
             .send()
@@ -234,7 +222,7 @@ impl UpstreamClient {
 
     pub async fn cover(&self, host: &Host, index: u32) -> AppResult<(String, Vec<u8>)> {
         let response = self
-            .for_host(host)
+            .client
             .get(format!("{}/api/covers/{index}", web_url(host)))
             .basic_auth(&host.username, Some(&host.password))
             .send()
