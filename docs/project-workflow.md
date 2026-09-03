@@ -28,7 +28,7 @@ Sunshine Manager
 
 ## 2. 启动流程
 
-正式进程首先验证 `releases/0.7.0` 全树 manifest、source revision、target、`/api/v2`、Schema 和 Web
+正式进程首先验证 `releases/0.8.0` 全树 manifest、source revision、target、`/api/v2`、Schema 和 Web
 fingerprint，确认 `STATIC_DIR` 正是该树的 `web/`。随后解析环境，取得数据库锁，对现有 main/WAL/journal
 先生成稳定的私有代际快照并在副本上预检，再由 live pool 复核；源 `-shm` 只做文件身份检查，不由 SQLite
 打开。然后执行 SQLite integrity/foreign-key 检查并用当前 key 认证全部
@@ -115,7 +115,7 @@ external HTTPS cover URL
 ## 8. 发行流程
 
 ```text
-clean checkout + annotated v0.7.0 == HEAD
+clean checkout + annotated v0.8.0 == HEAD
  -> Web/npm locked build
  -> optimized source-bound Rust binary
  -> exact manifest and archive
@@ -125,12 +125,13 @@ clean checkout + annotated v0.7.0 == HEAD
  -> checksum and immutable publication
 ```
 
-归档只包含 `0.7.0/` 当前树，没有迁移、备份或恢复逻辑。
+归档只包含 `0.8.0/` 当前树，没有迁移、备份或恢复逻辑。
 
 Foundation 提供的 current-only Schema identity 会进入 binary identity 的构造，但不会替代本项目更严格的
-release-tree verifier。所有构建固定 Foundation 0.3.0：Rust 使用 Git full revision
-`1fe326081cfd896f05ff502e80f99504797c14c6`，Web 使用 GitHub Release `v0.3.0` 的四个 tarball 与 lockfile
-integrity；不保留 sibling path/file 开发分支。
+release-tree verifier。当前迁移工作树使用 Foundation 0.4.0 Rust 联调 path 和本地构建的 0.4.0 Web
+tarball，manifest/lockfile 已绑定将要发布的 URL 和实际制品 integrity。Foundation `v0.4.0` 发布后，
+必须在同一发行准入变更中将 Rust 替换为完整 Git revision，并在无 sibling 环境重跑 `npm ci`；
+在此之前不得发布 Sunshine 0.8.0。
 
 上述正式构建、binary 和随发行树交付的 Web 仅面向 Linux AMD64。Sunshine Host 与 Moonlight Client 是
 控制面管理的外部对象，不属于本仓 Server target，也没有因本项目构建矩阵收窄而改变协议或平台支持。

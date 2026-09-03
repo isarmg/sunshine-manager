@@ -3,7 +3,7 @@
 ## 1. 生产布局
 
 ```text
-/opt/isarmg/sunshine-manager/releases/0.7.0/  root-owned read-only release
+/opt/isarmg/sunshine-manager/releases/0.8.0/  root-owned read-only release
 /etc/isarmg/sunshine-manager.env             0600 environment
 /var/lib/isarmg/sunshine-manager/db/sunshine-manager.sqlite3  SQLite
 /run/isarmg/sunshine-manager/                locks/runtime
@@ -12,8 +12,8 @@
 systemd 使用 `isarmg-sunshine`，直接执行：
 
 ```text
-/opt/isarmg/sunshine-manager/releases/0.7.0/bin/sunshine-manager \
-  serve-release --root /opt/isarmg/sunshine-manager/releases/0.7.0
+/opt/isarmg/sunshine-manager/releases/0.8.0/bin/sunshine-manager \
+  serve-release --root /opt/isarmg/sunshine-manager/releases/0.8.0
 ```
 
 发行树无 `current` 链接，不依赖工作目录，必须拒绝 symlink、特殊文件、hardlink asset、服务账户拥有的
@@ -21,26 +21,26 @@ asset 和 group/world writable 内容。
 
 ## 2. 构建与安装发行物
 
-从干净且 annotated `v0.7.0` 精确指向 HEAD 的 checkout：
+从干净且 annotated `v0.8.0` 精确指向 HEAD 的 checkout：
 
 ```bash
 python3 scripts/package-release.py /absolute/release-output
 ```
 
-构建输入还包括精确的 Sarmg Foundation 0.3.0 Rust 与 npm 包。六个 Rust crate 必须来自
-`https://github.com/isarmg/sarmg-foundation.git` 的完整 revision
-`1fe326081cfd896f05ff502e80f99504797c14c6`；四个 Web 包必须来自 GitHub Release `v0.3.0` 中各自的
-`sarmg-<name>-0.3.0.tgz`，并由 npm lockfile 的 SHA-512 integrity 固定内容。开发、CI 与正式构建使用同一
-不可变来源，不保留 sibling path/file 例外。Foundation 不是生产运行服务，发行树中不增加其 daemon、
-配置或 socket。
+本迁移工作树联调 Foundation 0.4.0 Rust crate 和本地生成的四个 0.4.0 npm tarball；Web manifest
+与 lockfile 已预先绑定将要发布的 `v0.4.0` URL 和这些 tarball 的 SHA-512 integrity。正式发行前必须
+等 Foundation `v0.4.0` 指向不可变完整 revision，将 Cargo 的联调 `path` 统一替换为该 revision，
+并在无 sibling Foundation 的干净环境执行 `npm ci`。在这些条件满足前，不得将 Sunshine 0.8.0
+工作树标记为正式发行。
+Foundation 不是生产运行服务，发行树中不增加其 daemon、配置或 socket。
 
 输出已存在时拒绝覆盖。安装：
 
 ```bash
-tar -xzf sunshine-manager-0.7.0-x86_64-unknown-linux-gnu.tar.gz \
+tar -xzf sunshine-manager-0.8.0-x86_64-unknown-linux-gnu.tar.gz \
   -C /opt/isarmg/sunshine-manager/releases
-/opt/isarmg/sunshine-manager/releases/0.7.0/bin/sunshine-manager \
-  verify-release --root /opt/isarmg/sunshine-manager/releases/0.7.0
+/opt/isarmg/sunshine-manager/releases/0.8.0/bin/sunshine-manager \
+  verify-release --root /opt/isarmg/sunshine-manager/releases/0.8.0
 ```
 
 安装仓库内 systemd unit，创建专用账户、状态目录和 `/etc/isarmg/sunshine-manager.env`，再 enable/start。
@@ -59,10 +59,9 @@ Moonlight 客户端使用 AMD64，也不改变 Sunshine 上游 API；它们仍�
 | `..._CREDENTIAL_KEY_ID` | 当前 key ID | 必须与当前库中全部 envelope 一致 |
 | `..._CREDENTIAL_KEY` | Base64 32 字节 | 独立秘密管理，禁止日志/仓库 |
 | `..._BOOTSTRAP_ADMIN_USERNAME` | `admin` | 1–64 字节 printable ASCII candidate；解析后必须得到 3–64 字节 canonical username |
-| `..._BOOTSTRAP_ADMIN_PASSWORD` | `auth_users` 为空时必填 | 12–1024 字节且无 ASCII control；使用后立即轮换初始密码 |
-| `..._SESSION_TTL_SECONDS` | 43200 | 绝对期限 |
-| `..._SESSION_IDLE_TTL_SECONDS` | 1800 | 空闲期限 |
-| `..._SESSION_COOKIE_SECURE` | 生产 true | 只通过 HTTPS |
+| `..._BOOTSTRAP_ADMIN_PASSWORD` | `_sarmg_administrators` 为空时必填 | 12–1024 字节且无 ASCII control；使用后立即轮换初始密码 |
+
+Session、Cookie、CSRF 和登录限流使用 Foundation `AdministratorPolicyV1` 固定值，产品环境变量不能覆盖。
 | `..._COVER_URL_ALLOWLIST` | 默认空 | 逗号分隔精确 DNS host |
 | `..._COVER_PROXY_ORIGIN` | allowlist 非空时必填 | Sunshine 主机直达 HTTPS origin |
 
@@ -70,7 +69,7 @@ Moonlight 客户端使用 AMD64，也不改变 Sunshine 上游 API；它们仍�
 
 ```bash
 sunshine-manager identity
-sunshine-manager verify-release --root /opt/isarmg/sunshine-manager/releases/0.7.0
+sunshine-manager verify-release --root /opt/isarmg/sunshine-manager/releases/0.8.0
 sunshine-manager doctor
 sunshine-manager admin-create --database-url sqlite:///path/app.db
 sunshine-manager admin-reset-password --database-url sqlite:///path/app.db \
@@ -98,7 +97,7 @@ constant-time 比较；裸 SHA-256 或另一 master key 生成的 fingerprint �
 业务探针行；它不是纯只读命令，因为会执行随后回滚的写事务。
 
 其中 WAL/FULL synchronous/foreign-key/busy-timeout 连接基线、checkpoint、integrity/FK 和 Schema 指纹算法来自
-Foundation 0.3；数据库文件权限、main/WAL/journal 私有代际快照预检、DDL/init、失败清理、运行/maintenance
+Foundation 0.4；数据库文件权限、main/WAL/journal 私有代际快照预检、DDL/init、失败清理、运行/maintenance
 锁仍由 Sunshine Manager 负责。预检只读取源 `-shm` 的类型与身份，不在源库上建立 SQLite 连接；因此非当前
 库拒绝不会改写 SHM 锁字节。故障定位时不要绕过任一层，也不要用 Foundation API 现场创建或转换非当前库。
 
@@ -122,13 +121,13 @@ private/link-local/loopback/metadata egress 和危险 redirect。
 ## 7. 当前连续性限制与外部升级边界
 
 Sunshine Manager 产品仓没有 backup、restore、Schema conversion、key rotation 或 re-encryption 命令。
-`sarmg-upgrade` 是这些能力的唯一所有者，但当前也没有登记 Sunshine 的具体历史 edge，因此本版本不能把
-文件复制、SQLite `.backup` 或手工换 key 描述为受支持的恢复/升级流程。数据库与 32-byte external key
-必须作为一个安全单元独立保全，这只是未来工具实现的必要条件，不是当前恢复承诺。
+`sarmg-upgrade` 是这些能力的唯一所有者，已实现 Sunshine 0.8.0 精确当前 SQLite 状态的 keyed
+backup/verify/restore。数据库与 32-byte external key 必须作为一个安全单元保全，并且只能使用
+该工具的显式命令；文件复制、SQLite `.backup` 或手工换 key 不属于受支持流程。
 
-需要新环境时，创建全新的当前数据库和 current key，并由管理员重新登记 Host；不要把非当前库交给
-Server，也不要逐表复制。若未来实现 edge，必须在升级仓中显式声明来源/目标 identity、maintenance
-exclusive、全密文认证、临时 generation、原子安装、journal 与故障注入测试，产品仓仍不增加分支。
+需要新环境时，可以恢复经 `sarmg-upgrade` 严格验证的 0.8.0 当前备份，或创建全新当前数据库并重新登记
+Host；不要把非当前库交给 Server，也不要逐表复制。本版本不包含任何历史 edge、key rotation 或
+re-encryption，产品仓也不增加兼容分支。
 
 ## 8. 监控与故障定位
 

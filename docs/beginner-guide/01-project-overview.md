@@ -17,7 +17,7 @@ Browser -> Manager API -> SQLite operation -> worker -> Sunshine API
 
 ## 1.3 当前身份
 
-当前 `0.7.0` binary、`/api/v2`、Schema revision 1/固定 SHA、credential envelope、Web fingerprint 和
+当前 `0.8.0` binary、`/api/v2`、Schema revision 2/固定 SHA、credential envelope、Web fingerprint 和
 release manifest 是一个不可拆分身份。产品不读取非当前状态，不注册平行路由，也不尝试其他 key。
 
 ## 1.4 主要模块
@@ -62,11 +62,11 @@ Secret 或上游错误正文。
 ## 1.9 平台与前端范围
 
 Server binary 及随其交付的 Web 发行树只支持 `x86_64-unknown-linux-gnu`。内置 Web 精确使用 Foundation
-0.3.0 的 admin-web/contracts/http-client/design-tokens、React 19.2.8、React DOM 19.2.8、Vite 7.3.6、
+0.4.0 的 admin-web/contracts/http-client/design-tokens、React 19.2.8、React DOM 19.2.8、Vite 7.3.6、
 TypeScript 5.8.3 与 Node 26.7.0。Sunshine Host 和 Moonlight Client 是外部数据面，不受 Server target
 收窄影响，上游请求路径和语义也未改写。
 
 ## 1.10 本章检查
 
 确认能解释 Manager 与 Sunshine 的所有权、为何远端写入不是数据库事务、为什么数据库和 external key
-必须独立保管、为什么当前没有恢复承诺、为什么 202 不表示远端已成功。
+必须独立保管、为什么只能通过 `sarmg-upgrade` 恢复精确 0.8.0 当前备份、为什么 202 不表示远端已成功。

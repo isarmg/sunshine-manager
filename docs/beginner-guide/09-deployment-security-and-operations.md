@@ -23,8 +23,9 @@ outbox、SQLite/WAL、磁盘/inode、cover 拒绝与一次性代理失败。
 
 ## 9.5 当前数据连续性限制
 
-产品没有 backup/restore；`sarmg-upgrade` 当前也没有 Sunshine 的具体历史 edge。数据库副本必须与
-external key 独立配对保全，但这不等于已有受支持恢复流程。新部署应创建全新当前数据库并重新登记 Host；
+产品没有 backup/restore；`sarmg-upgrade` 提供 Sunshine 0.8.0 当前状态的 keyed backup/verify/restore，
+但没有 Sunshine 历史 edge。数据库副本必须与 external key 独立配对保全；新部署可以恢复严格验证的
+0.8.0 备份，或创建全新当前数据库并重新登记 Host；
 不要对非当前库逐表复制、手改 metadata 或假定 SQLite 文件复制能够恢复。
 
 ## 9.6 Key rotation

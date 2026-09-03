@@ -52,16 +52,16 @@
 | SUN-044 | 调度与 outbox 每批最多 128，空闲轮询 250ms | `DISPATCH_BATCH`、`OUTBOX_BATCH`、`IDLE_POLL` | 保障 | 中 | 无界扫描会拖垮 SQLite；过小会增加积压延迟 | 大于一批、通知唤醒、空队列 |
 | SUN-045 | requested/completion/resolved 与业务状态同事务写 durable audit outbox | `audit_outbox`、`insert_outbox`、`insert_completion_outbox` | 保障 | 高 | 本地操作证据会丢失或与业务状态分裂 | 事务故障、重启、三类事件 |
 | SUN-046 | outbox 用稳定事件 ID 幂等物化到本地 `audit_logs` | `deliver_outbox`、`audit_logs_outbox_id_idx`、delivered 标记 | 保障 | 高 | 进程/数据库故障后可能漏记或重复本地审计；当前实现不是外部 sink/exporter | 物化前/事务中故障、同 ID 重放、后台循环续处理 |
-| SUN-047 | 管理 Session 精确为 `{authenticated,user_id,username,role,csrf_token}` 且 role 只有 `admin` | Foundation `AdministratorSession`、`auth_users` 无 role 列 | 核心 | 高 | 引入 viewer/operator 或增删 Session 字段会扩大授权矩阵并使各项目再次分叉 | 五字段 exact-shape、`authenticated=true`/`role=admin`、Schema 列审计、无权限分支 |
-| SUN-048 | 管理员 username 使用 Foundation 唯一规范化和 canonical 规则 | `normalize_administrator_username`、`auth_users.username` CHECK/UNIQUE | 保障 | 中 | 大小写/空白别名会破坏唯一性与账户限流；放宽字符会使产品合同分叉 | candidate 1–64 printable ASCII；trim/lower；canonical 3–64、`[a-z0-9._-]`、首尾字母数字；`@`/Unicode/重复拒绝；存量启动检查 |
+| SUN-047 | 管理 Session 精确为 `{authenticated,user_id,username,role,csrf_token}` 且 role 只有 `admin` | Foundation `AdministratorSession`、`_sarmg_administrators` 无 role 列 | 核心 | 高 | 引入 viewer/operator 或增删 Session 字段会扩大授权矩阵并使各项目再次分叉 | 五字段 exact-shape、`authenticated=true`/`role=admin`、Schema 列审计、无权限分支 |
+| SUN-048 | 管理员 username 使用 Foundation 唯一规范化和 canonical 规则 | `sarmg-admin-core`、`_sarmg_administrators.username` CHECK/UNIQUE | 保障 | 中 | 大小写/空白别名会破坏唯一性与账户限流；放宽字符会使产品合同分叉 | candidate 1–64 printable ASCII；trim/lower；canonical 3–64、`[a-z0-9._-]`、首尾字母数字；`@`/Unicode/重复拒绝；存量启动检查 |
 | SUN-049 | 密码只接受 Foundation 当前 Argon2id 参数和长度 | `sarmg-admin-auth`、bootstrap/login | 保障 | 高 | 弱参数或多验证器会降低抗破解性并积累密码兼容代码 | PHC 参数、上下界、错密码、非当前 hash |
 | SUN-050 | 未知账户仍走有成本的密码校验路径 | login handler、固定策略 dummy hash | 保障 | 中 | 响应时间差可用于枚举管理员用户名 | 已知/未知账户耗时和响应等价 |
 | SUN-051 | 登录 transport peer 20 次/账户 10 次/5 分钟，不信任 forwarded header | `ConnectInfo`、`LoginAdmission` | 保障 | 中 | 暴力破解可绕过单维限流；经反向代理时所有浏览器共享一个 Server 来源 bucket，代理还需独立限流 | 两个维度、窗口恢复、forwarded spoof 不改变来源、`Retry-After` |
 | SUN-052 | 来源和账户两个登录 bucket map 各自最多 4096 项并清除过期/最老项 | `MAX_BUCKETS`、`prune`/`record` | 保障 | 中 | 随机来源/账户攻击可让内存持续增长；总上界是两个 map 各 4096 而非共享 4096 | 两个维度分别超量、时间推进、合法账户继续工作 |
 | SUN-053 | Argon2 同时最多 2 个，等待最多 2 秒 | semaphore、timeout | 保障 | 中 | 密码哈希可耗尽异步 worker 和 CPU | 三个并发、超时 429、permit 释放 |
-| SUN-054 | Session/CSRF Token 使用 CSPRNG，库内仅保存 SHA-256 摘要 | `InternalAuth::issue`、sessions 表 | 保障 | 高 | 数据库泄漏即可直接接管浏览器会话 | 随机性、摘要长度、明文扫描 |
+| SUN-054 | Session/CSRF Token 使用 CSPRNG，库内仅保存 SHA-256 摘要 | Foundation `AdministratorService`、`_sarmg_admin_sessions` | 保障 | 高 | 数据库泄漏即可直接接管浏览器会话 | 随机性、摘要长度、明文扫描 |
 | SUN-055 | Session 同时执行 idle 与 absolute TTL | `authenticate_session`、配置 TTL | 保障 | 高 | 失窃 token 可无限使用，或合法活动错误越过绝对期限 | idle 刷新、absolute 截断、边界过期 |
-| SUN-056 | 正式 Cookie 固定 `__Host-`、HttpOnly、Secure、SameSite=Strict、Path=/ | `InternalAuth::session_cookie` | 保障 | 中 | JS、明文链路或跨站请求更容易窃取/滥用 token | production/dev 两模式、Set-Cookie exact 属性 |
+| SUN-056 | 正式 Cookie 固定 `__Host-`、HttpOnly、Secure、SameSite=Strict、Path=/ | Foundation `session_set_cookie` | 保障 | 中 | JS、明文链路或跨站请求更容易窃取/滥用 token | production/dev 两模式、Set-Cookie exact 属性 |
 | SUN-057 | Session 恢复时轮换 CSRF secret 并替换服务端摘要 | `/auth/session`、`rotate_session_csrf` | 保障 | 高 | 长期复用 CSRF secret 扩大泄露窗口；旧 token 仍有效会削弱轮换 | 新 token 成功、被替换 token 拒绝、并发恢复 |
 | SUN-058 | CSRF 只在响应 JSON/前端内存中流转，不设置可读 Cookie | auth handlers、`@sarmg/admin-web` | 保障 | 中 | 可读 Cookie 增加浏览器暴露面，并复制两套 token 来源 | Cookie 集合、刷新/重载、DOM/存储扫描 |
 | SUN-059 | unsafe method 同时验证 CSRF 摘要与 Foundation Origin/Host 规则 | protected middleware、`sarmg-admin-auth` | 保障 | 高 | 登录 Cookie 可被跨站表单或错误代理来源利用 | POST/PATCH/DELETE、缺失/重复/错 Origin/Host |
@@ -84,7 +84,7 @@
 | SUN-076 | static root 必须绝对路径且顶层恰好 `index.html`/`assets` | `validate_static_dir` | 保障 | 中 | 启动可能提供错误构建、源码或残留文件 | 相对路径、缺项、额外顶层项 |
 | SUN-077 | static tree 深度≤32、条目≤10000、只含真实目录/普通文件 | `validate_static_tree` | 保障 | 中 | symlink/hardlink/巨树可越界读取或制造 TOCTOU/DoS | link、设备文件、深度/数量、nlink |
 | SUN-078 | 正式 static 资产非服务账户所有且不可 group/world 写 | Unix metadata validation | 保障 | 中 | 被攻陷服务进程可篡改下次响应的管理 UI | uid、022 mode、开发模式差异 |
-| SUN-079 | Web 固定 Foundation 0.3.0 GitHub Release tarballs、React/DOM 19.2.8、Vite 7.3.6、TypeScript 5.8.3、Node 26.7.0；Rust Foundation 固定 full Git revision | `Cargo.toml` rev、`clients/web/package.json` immutable URLs、lockfiles、`.node-version`、toolchain check | 开发运维 | 中 | path/file/可变分支或多套前端基线会破坏可复现供应链并增加漏洞、工具链和行为差异 | clean Cargo locked resolve、`npm ci`、Foundation URL/version/integrity check、typecheck/build、无 path/file 扫描 |
+| SUN-079 | 联调期 Rust 使用 Foundation 0.4.0 path；正式发行必须将 Rust/Web 同时锁定 Foundation 0.4.0 完整 Git revision 和 GitHub Release tarball | `Cargo.toml`、`clients/web/package.json`、lockfiles、`.node-version`、toolchain check | 开发运维 | 中 | 未发布期间伪造 revision/URL，或在正式发行中留下 path/file/多版本会破坏可复现供应链 | 联调测试；发布后 clean Cargo locked resolve、`npm ci`、URL/version/integrity 与无 path/file 扫描 |
 | SUN-080 | 认证状态机统一使用 Foundation admin-web | `@sarmg/admin-web`、`App.tsx` | 保障 | 高 | 登录/恢复/401/退出竞态会在各产品重复实现并分叉 | stale response、重登、卸载、no-store |
 | SUN-081 | Web 请求固定 same-origin、严格响应 guard 和超时/大小边界 | Foundation http-client/contracts | 保障 | 中 | 可被配置成跨 origin 发送 Cookie，或把畸形响应当合法数据 | absolute URL 拒绝、错 shape/MIME/超时 |
 | SUN-082 | 当前 Web 在认证丢失后清空 Host 列表和错误状态，并取消慢 Host 响应回填 | `clients/web/src/App.tsx` effect cleanup | 保障 | 中 | 下一位使用同一浏览器的人可能看到上一管理员的 Host 投影；当前 Web 没有 operation 状态 | 慢请求、restore error、logout/login overlap |
@@ -148,20 +148,20 @@ Server 不终止浏览器侧 TLS，也不自行注入 HSTS/CSP；这些响应策
 ## 4. 当前版本边界
 
 - 只注册 `/api/v2/auth/*` 与 `/api/v2/sunshine/*`。
-- 只接受 `sunshine-manager 0.7.0`、Schema revision 1、SHA-256
-  `a717bcd5a591e7f7cc6da5826af88ad0deab2fdc339ce4649ad84f21ea879dbc`。
+- 只接受 `sunshine-manager 0.8.0`、Schema revision 2、SHA-256
+  `c9dedb33dd7a5ad613e762eb135a7aa5184ce1df52166459bee7b3485b4b3be3`。
 - 只接受配置的当前 credential key ID/key；没有 previous-key keyring。
 - 只接受当前带记录身份 AAD 的 `sunshine:v1:` envelope；相同文本前缀的空 AAD/旧密文仍会认证失败，
   不通过降级解密、试错 AAD 或跨行重加密兼容。
 - 只接受当前 HKDF 分域 HMAC-SHA-256 request fingerprint/Idempotency-Key hash；没有裸 SHA-256、共用
   HMAC key、previous master key 或失败后试算其他算法的分支。
 - 不读取 migration ledger、非当前数据库或未知发行 manifest。
-- 不包含 backup、restore、migration、key rotation 或 re-encryption 实现。
+- 产品二进制不包含 backup、restore、migration、key rotation 或 re-encryption；精确当前状态备份/恢复由 `sarmg-upgrade` 实现。
 
 Foundation 只提供当前版本的共享原语，不是在线服务或产品框架。应用层 `AppError` 固定输出
 `{code,message,retryable,request_id?,details?}`，未知字段不属于当前合同；Axum extractor/layer rejection
 当前仍是框架响应并会被 Foundation Web client fail-closed 拒绝。Web 使用同源、有界 HTTP client，但
-Session 与 CSRF Token 生命周期仍由 Sunshine Manager 持有。Foundation 负责 SQLite 连接 PRAGMA、
+Session 与 CSRF Token 生命周期由 Foundation Admin Core 持有。Foundation 负责 SQLite 连接 PRAGMA、
 integrity/FK/checkpoint 和 Schema identity 算法；本项目继续负责数据库路径/权限、私有代际快照预检、DDL、初始化、
 失败清理、运行锁和外部升级仓边界。
 
@@ -256,7 +256,8 @@ CRUD 没有 revision 或 `If-Match`，同一进程内虽按 Host 加锁，两个
 | External key | 数据库外受保护配置 | raw bytes 不进数据库、release、日志或 support bundle |
 
 当前数据库 SHA 为上文列出的 code-owned 值。数据库副本只有与正确 external key 配对才有技术意义；但
-本版本没有受支持的备份/恢复命令或已登记的 Sunshine upgrade edge，复制文件不能被描述成可恢复承诺。
+当前 `sarmg-upgrade` 提供 Sunshine 0.8.0 keyed backup/verify/restore，但没有已登记的历史 upgrade edge；
+绕过该工具复制文件不能被描述成可恢复承诺。
 只改 metadata 或 key ID 不能让错误状态变合法。
 
 `sunshine:v1:<key-id>:<base64(nonce|ciphertext|tag)>` 是存储 envelope，不是完整认证合同。当前实现为每个

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use sarmg_admin_core::AdministratorStore;
 use sunshine_manager::{
     ServeConfig, db,
     http::{WorkerState, probe_loop, router},
@@ -82,13 +83,25 @@ async fn main() -> anyhow::Result<()> {
         Command::AdminCreate(args) => {
             let maintenance = MaintenanceLock::exclusive(&args.database_url)?;
             let pool = db::open_or_initialize(&maintenance.database_url()).await?;
-            let username = sunshine_manager::auth::normalize_administrator_username(
+            let username = sarmg_admin_auth::normalize_administrator_username(
                 &std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_USERNAME")
                     .unwrap_or_else(|_| "admin".to_string()),
             )?;
             let password = std::env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD").ok();
+            let service = sarmg_admin_core::AdministratorService::new(
+                sarmg_admin_sqlite::SqliteAdministratorStore::new(pool),
+            );
             anyhow::ensure!(
-                db::ensure_admin_user(&pool, &username, password.as_deref()).await?,
+                service
+                    .bootstrap_administrator(
+                        &username,
+                        password.as_deref().ok_or_else(|| anyhow::anyhow!(
+                            "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD is required"
+                        ))?,
+                        current_time_micros()?,
+                    )
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error))?,
                 "admin-create only initializes a database with no administrator"
             );
             println!("{{\"status\":\"admin-ready\",\"username\":{username:?}}}");
@@ -97,9 +110,14 @@ async fn main() -> anyhow::Result<()> {
         Command::AdminResetPassword(args) => {
             let maintenance = MaintenanceLock::exclusive(&args.database_url)?;
             let pool = db::open_existing(&maintenance.database_url()).await?;
-            let username =
-                sunshine_manager::auth::normalize_administrator_username(&args.username)?;
-            db::reset_admin_password(&pool, &username, &args.password).await?;
+            let username = sarmg_admin_auth::normalize_administrator_username(&args.username)?;
+            let service = sarmg_admin_core::AdministratorService::new(
+                sarmg_admin_sqlite::SqliteAdministratorStore::new(pool),
+            );
+            service
+                .change_administrator_password(&username, &args.password, current_time_micros()?)
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?;
             println!(
                 "{{\"status\":\"password-reset\",\"username\":{:?}}}",
                 username
@@ -154,19 +172,23 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
     let application_lock = ApplicationLock::acquire(&config.database_url)?;
     let pool = db::open_or_initialize(&application_lock.database_url()).await?;
     db::require_current_runtime_state(&pool, &config.secrets).await?;
-    db::ensure_admin_user(
-        &pool,
-        &config.bootstrap_admin_username,
-        config.bootstrap_admin_password.as_deref(),
-    )
-    .await?;
-    let state = WorkerState::new(
-        pool,
-        config.secrets,
-        config.internal_auth,
-        config.static_dir,
-    )?
-    .with_cover_delivery(config.cover_url_policy, config.cover_proxy);
+    let administrator_service = sarmg_admin_core::AdministratorService::new(
+        sarmg_admin_sqlite::SqliteAdministratorStore::new(pool.clone()),
+    );
+    if administrator_service.store().administrator_count().await? == 0 {
+        administrator_service
+            .bootstrap_administrator(
+                &config.bootstrap_admin_username,
+                config.bootstrap_admin_password.as_deref().ok_or_else(|| anyhow::anyhow!(
+                    "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD is required while no administrators exist"
+                ))?,
+                current_time_micros()?,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+    }
+    let state = WorkerState::new(pool, config.secrets, config.production, config.static_dir)?
+        .with_cover_delivery(config.cover_url_policy, config.cover_proxy);
     let recovered = state.operation_manager().recover_startup().await?;
     if let Err(error) = state.operation_manager().deliver_outbox().await {
         tracing::warn!(%error, "initial audit outbox delivery failed; background retry will continue");
@@ -190,6 +212,12 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
     operations.abort();
     result?;
     Ok(())
+}
+
+fn current_time_micros() -> anyhow::Result<u64> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())
+        .map_err(|_| anyhow::anyhow!("current time exceeds administrator timestamp range"))
 }
 
 async fn shutdown() {

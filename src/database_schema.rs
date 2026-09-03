@@ -6,10 +6,9 @@ use std::{
 };
 
 use anyhow::{Context, ensure};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags};
 use sarmg_schema_identity::{
-    PRODUCT_METADATA_DDL, ProductMetadataRow, SQLITE_SCHEMA_ROWS_QUERY, SchemaIdentity, SchemaRow,
-    verify_current_schema,
+    ProductMetadataRow, SQLITE_SCHEMA_ROWS_QUERY, SchemaIdentity, SchemaRow, verify_current_schema,
 };
 use sarmg_sqlite::PoolOptions;
 use sha2::{Digest, Sha256};
@@ -20,10 +19,10 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 pub const APPLICATION: &str = "sunshine-manager";
 pub const APPLICATION_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SCHEMA_REVISION: i64 = 1;
-pub const SCHEMA_SHA256: &str = "a717bcd5a591e7f7cc6da5826af88ad0deab2fdc339ce4649ad84f21ea879dbc";
+pub const SCHEMA_REVISION: i64 = 2;
+pub const SCHEMA_SHA256: &str = "c9dedb33dd7a5ad613e762eb135a7aa5184ce1df52166459bee7b3485b4b3be3";
 
-const CURRENT_SCHEMA_SQL: &str = include_str!("../schema.sql");
+const CURRENT_SCHEMA_SQL: &str = include_str!("../schema/generated/current_schema.sql");
 
 pub fn current_schema_identity() -> SchemaIdentity {
     SchemaIdentity::new(
@@ -132,12 +131,22 @@ pub async fn initialize_empty(pool: &SqlitePool) -> anyhow::Result<()> {
         existing == 0,
         "database is not empty; upgrades require the external upgrade tool"
     );
-    sqlx::raw_sql(PRODUCT_METADATA_DDL)
-        .execute(&mut *transaction)
-        .await?;
     sqlx::raw_sql(CURRENT_SCHEMA_SQL)
         .execute(&mut *transaction)
         .await?;
+    let created_at_micros = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_micros(),
+    )?;
+    sqlx::query(
+        "INSERT INTO _sarmg_platform_metadata(\
+           singleton,platform_generation,platform_schema_revision,profile,created_at_micros\
+         ) VALUES(1,1,1,'server-control-plane',?)",
+    )
+    .bind(created_at_micros)
+    .execute(&mut *transaction)
+    .await?;
     let actual = sarmg_sqlite::schema_fingerprint(&mut *transaction).await?;
     ensure!(
         actual == SCHEMA_SHA256,
@@ -159,18 +168,16 @@ pub async fn initialize_empty(pool: &SqlitePool) -> anyhow::Result<()> {
 }
 
 pub async fn validate_pool(pool: &SqlitePool) -> anyhow::Result<()> {
-    let metadata_sql: Option<String> = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='product_metadata'",
-    )
-    .fetch_optional(pool)
-    .await?;
-    ensure!(
-        metadata_sql.as_deref() == Some(PRODUCT_METADATA_DDL),
-        "database product_metadata schema is not the exact current contract"
-    );
     sarmg_sqlite::require_pool_current_schema(pool, &current_schema_identity())
         .await
         .context("database is not the exact current Sunshine Manager schema; use sarmg-upgrade")?;
+    let platform = sarmg_platform_db::read_platform_metadata(pool).await?;
+    ensure!(
+        platform.platform_generation == sarmg_platform_db::PLATFORM_GENERATION
+            && platform.platform_schema_revision == sarmg_platform_db::PLATFORM_SCHEMA_REVISION
+            && platform.profile == "server-control-plane",
+        "database platform metadata is not the exact current contract"
+    );
     Ok(())
 }
 
@@ -360,17 +367,6 @@ fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn validate_connection_contract(connection: &Connection) -> anyhow::Result<()> {
-    let metadata_sql: Option<String> = connection
-        .query_row(
-            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='product_metadata'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    ensure!(
-        metadata_sql.as_deref() == Some(PRODUCT_METADATA_DDL),
-        "database product_metadata schema is not the exact current contract"
-    );
     let metadata = {
         let mut statement = connection.prepare(
             "SELECT singleton,application,application_version,schema_revision,schema_sha256 \

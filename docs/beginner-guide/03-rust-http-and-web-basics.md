@@ -15,7 +15,7 @@ HTTP handler 只负责认证、验证和持久化意图；worker claim operation
 浏览器请求和 Sunshine 响应均需 body 大小、连接/总超时、并发与错误正文上限。远端返回成功状态也不
 意味着 JSON 符合合同；解析和业务验证仍要执行。
 
-浏览器侧复用 Foundation 0.3 的 same-origin HTTP client 与错误合同：`baseUrl` 固定为当前页面 origin，
+浏览器侧复用 Foundation 0.4 的 same-origin HTTP client 与错误合同：`baseUrl` 固定为当前页面 origin，
 调用路径还必须位于 `/api/v2/`。每个成功响应传入明确 runtime guard；不能用 `as T` 把未知 JSON 当成
 已验证对象。到 Sunshine Host 的 HTTPS client 则有产品特有的 TLS、DNS、redirect 和正文策略，仍在本项目。
 

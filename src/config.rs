@@ -2,22 +2,18 @@ use std::{
     env, fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use crate::{
-    auth::InternalAuth, cover_policy::CoverUrlPolicy, cover_proxy::CoverProxy, crypto::SecretBox,
-};
+use crate::{cover_policy::CoverUrlPolicy, cover_proxy::CoverProxy, crypto::SecretBox};
 
 #[derive(Clone)]
 pub struct ServeConfig {
     pub bind: SocketAddr,
     pub database_url: String,
     pub production: bool,
-    pub internal_auth: InternalAuth,
     pub secrets: SecretBox,
     pub cover_url_policy: CoverUrlPolicy,
     pub cover_proxy: CoverProxy,
@@ -40,18 +36,10 @@ impl ServeConfig {
         let production = parse_bool("SUNSHINE_MANAGER_PRODUCTION", true)?;
         let static_dir =
             validate_static_dir(&required("SUNSHINE_MANAGER_STATIC_DIR")?, production)?;
-        let session_absolute_ttl =
-            Duration::from_secs(parse_u64("SUNSHINE_MANAGER_SESSION_TTL_SECONDS", 43_200)?);
-        let session_idle_ttl = Duration::from_secs(parse_u64(
-            "SUNSHINE_MANAGER_SESSION_IDLE_TTL_SECONDS",
-            1_800,
-        )?);
-        let cookie_secure = parse_bool("SUNSHINE_MANAGER_SESSION_COOKIE_SECURE", production)?;
-        if production && !cookie_secure {
-            anyhow::bail!("production requires Secure session cookies");
-        }
-        if !cookie_secure && !bind.ip().is_loopback() {
-            anyhow::bail!("insecure development cookies require a loopback bind address");
+        if !production && !bind.ip().is_loopback() {
+            anyhow::bail!(
+                "development HTTP administrator sessions require a loopback bind address"
+            );
         }
 
         let cover_url_policy =
@@ -64,21 +52,15 @@ impl ServeConfig {
             ),
             Err(error) => return Err(error.into()),
         };
-        let bootstrap_admin_username = crate::auth::normalize_administrator_username(&value(
+        let bootstrap_admin_username = sarmg_admin_auth::normalize_administrator_username(&value(
             "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_USERNAME",
             "admin",
-        ))
-        .map_err(|error| anyhow::anyhow!(error))?;
+        ))?;
 
         Ok(Self {
             bind,
             database_url,
             production,
-            internal_auth: InternalAuth::new(
-                session_absolute_ttl,
-                session_idle_ttl,
-                cookie_secure,
-            )?,
             secrets: SecretBox::new(
                 value("SUNSHINE_MANAGER_CREDENTIAL_KEY_ID", "primary"),
                 credential_key,
@@ -188,12 +170,6 @@ fn required(name: &str) -> anyhow::Result<String> {
 
 fn value(name: &str, default: &str) -> String {
     env::var(name).unwrap_or_else(|_| default.to_string())
-}
-
-fn parse_u64(name: &str, default: u64) -> anyhow::Result<u64> {
-    value(name, &default.to_string())
-        .parse()
-        .with_context(|| format!("{name} must be an unsigned integer"))
 }
 
 fn parse_bool(name: &str, default: bool) -> anyhow::Result<bool> {

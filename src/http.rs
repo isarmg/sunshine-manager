@@ -3,22 +3,20 @@ use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time:
 use axum::{
     Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Request, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
 };
-use sarmg_contracts::{
-    ADMIN_LOGIN_PATH, ADMIN_LOGOUT_PATH, ADMIN_SESSION_PATH, AdministratorLoginRequest,
-    AdministratorSession,
-};
+use sarmg_admin_auth::AdministratorOriginMode;
+use sarmg_admin_core::AdministratorService;
+use sarmg_admin_sqlite::SqliteAdministratorStore;
 use serde_json::Value;
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
 
 use crate::{
-    InternalAuth, InternalIdentity,
     client::UpstreamClient,
     cover_policy::CoverUrlPolicy,
     cover_proxy::CoverProxy,
@@ -34,34 +32,43 @@ use crate::{
         HostMutationLocks, OperationManager, OperationView, RemoteOperationRequest,
         validate_idempotency_key,
     },
-    release_contract::{API_NAMESPACE, API_PREFIX, API_VERSION_PREFIX},
+    release_contract::{API_NAMESPACE, API_VERSION_PREFIX},
 };
 
 #[derive(Clone)]
 pub struct WorkerState {
     pub pool: SqlitePool,
     pub secrets: SecretBox,
-    pub auth: InternalAuth,
+    administrator_service: Arc<AdministratorService<SqliteAdministratorStore>>,
+    administrator_origin_mode: AdministratorOriginMode,
     upstream: UpstreamClient,
     health: Arc<RwLock<HashMap<String, HealthSnapshot>>>,
     operations: OperationManager,
     cover_url_policy: CoverUrlPolicy,
     cover_proxy: CoverProxy,
-    login_admission: crate::login_admission::LoginAdmission,
-    dummy_password_hash: Arc<String>,
     static_dir: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InternalIdentity {
+    subject: String,
 }
 
 impl WorkerState {
     pub fn new(
         pool: SqlitePool,
         secrets: SecretBox,
-        auth: InternalAuth,
+        production: bool,
         static_dir: PathBuf,
     ) -> anyhow::Result<Self> {
-        let dummy_password_hash =
-            crate::auth::hash_password("sunshine-dummy-password-value-that-is-never-accepted")
-                .map_err(|error| anyhow::anyhow!(error))?;
+        let administrator_service = Arc::new(AdministratorService::new(
+            SqliteAdministratorStore::new(pool.clone()),
+        ));
+        let administrator_origin_mode = if production {
+            AdministratorOriginMode::ProductionHttps
+        } else {
+            AdministratorOriginMode::LoopbackDevelopmentHttp
+        };
         let upstream = UpstreamClient::new()?;
         let mutation_locks = HostMutationLocks::default();
         let operations = OperationManager::new(
@@ -73,14 +80,13 @@ impl WorkerState {
         Ok(Self {
             pool,
             secrets,
-            auth,
+            administrator_service,
+            administrator_origin_mode,
             upstream,
             health: Arc::new(RwLock::new(HashMap::new())),
             operations,
             cover_url_policy: CoverUrlPolicy::default(),
             cover_proxy: CoverProxy::disabled(),
-            login_admission: crate::login_admission::LoginAdmission::default(),
-            dummy_password_hash: Arc::new(dummy_password_hash),
             static_dir,
         })
     }
@@ -111,7 +117,6 @@ pub fn router(state: WorkerState) -> Router {
         .route("/health/ready", get(ready));
 
     let public_api = Router::new()
-        .route(auth_path_within_current_api(ADMIN_LOGIN_PATH), post(login))
         .route(
             "/sunshine/internal/hosts/{host_id}/operations/{operation_id}/covers/{token}",
             get(cover_delivery),
@@ -119,14 +124,6 @@ pub fn router(state: WorkerState) -> Router {
         .layer(DefaultBodyLimit::max(16 * 1024));
 
     let protected_api = Router::new()
-        .route(
-            auth_path_within_current_api(ADMIN_LOGOUT_PATH),
-            post(logout),
-        )
-        .route(
-            auth_path_within_current_api(ADMIN_SESSION_PATH),
-            get(session),
-        )
         .route("/sunshine/operations/{operation_id}", get(operation_get))
         .route(
             "/sunshine/operations/{operation_id}/retry",
@@ -172,52 +169,42 @@ pub fn router(state: WorkerState) -> Router {
         .fallback(|| async { StatusCode::NOT_FOUND });
 
     let static_dir = state.static_dir.clone();
+    let administrator = sarmg_admin_axum::administrator_router(
+        "sunshine-manager",
+        state.administrator_origin_mode,
+        Arc::clone(&state.administrator_service),
+    )
+    .expect("static Sunshine administrator adapter configuration is valid");
     Router::new()
         .merge(health)
         .nest(API_NAMESPACE, api_namespace)
         .fallback_service(ServeDir::new(static_dir))
         .with_state(state)
-}
-
-fn auth_path_within_current_api(path: &'static str) -> &'static str {
-    path.strip_prefix(API_PREFIX)
-        .filter(|relative| relative.starts_with('/'))
-        .expect("Foundation administrator path must belong to the current API")
+        .merge(administrator)
 }
 
 async fn authenticate(
     State(state): State<WorkerState>,
     mut request: Request,
     next: Next,
-) -> AppResult<Response> {
-    let token = state
-        .auth
-        .parse_session_token(request.headers())
-        .ok_or(AppError::Unauthorized)?;
-    let now = db::now_micros()?;
-    let session = db::authenticate_session(
-        &state.pool,
-        &state.auth,
-        &crate::auth::token_hash(&token),
-        now,
+) -> Response {
+    let identity = match sarmg_admin_axum::authenticate_request(
+        &state.administrator_service,
+        request.headers(),
+        request.uri(),
+        request.method(),
+        "sunshine-manager",
+        state.administrator_origin_mode,
     )
-    .await?
-    .ok_or(AppError::Unauthorized)?;
-    if is_mutation(request.method()) {
-        verify_mutation_request(
-            request.headers(),
-            request.uri(),
-            &session.csrf_hash,
-            state.auth.origin_mode(),
-        )?;
-    }
+    .await
+    {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
     request.extensions_mut().insert(InternalIdentity {
-        subject: session.user_id,
-        username: session.username,
-        session_id: session.session_id,
-        csrf_hash: session.csrf_hash,
+        subject: identity.administrator_id.to_string(),
     });
-    Ok(next.run(request).await)
+    next.run(request).await
 }
 
 async fn live(State(state): State<WorkerState>) -> Response {
@@ -242,147 +229,6 @@ async fn ready(State(state): State<WorkerState>) -> Response {
     };
     let _ = state;
     response
-}
-
-async fn login(
-    State(state): State<WorkerState>,
-    ConnectInfo(source): ConnectInfo<SocketAddr>,
-    uri: Uri,
-    headers: HeaderMap,
-    Json(request): Json<AdministratorLoginRequest>,
-) -> AppResult<Response> {
-    verify_same_origin(&headers, &uri, state.auth.origin_mode())?;
-    let normalized_username = crate::auth::normalize_administrator_username(&request.username)?;
-    sarmg_admin_auth::validate_password(&request.password)
-        .map_err(|error| AppError::BadRequest(error.to_string()))?;
-    state
-        .login_admission
-        .admit(Some(source.ip()), &normalized_username)
-        .await?;
-    let user = db::find_active_user_by_username(&state.pool, &normalized_username).await?;
-    let password_hash = user
-        .as_ref()
-        .map(|user| user.password_hash.clone())
-        .unwrap_or_else(|| (*state.dummy_password_hash).clone());
-    let password = request.password;
-    let permit = state.login_admission.argon2_permit().await?;
-    let verified = tokio::task::spawn_blocking(move || {
-        crate::auth::verify_password(&password, &password_hash)
-    })
-    .await
-    .map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("password verification failed: {error}"))
-    })?;
-    drop(permit);
-    let Some(user) = user.filter(|_| verified) else {
-        return Err(AppError::Unauthorized);
-    };
-    state
-        .login_admission
-        .clear_account(&normalized_username)
-        .await;
-    let now = db::now_micros()?;
-    let session = state.auth.issue(now)?;
-    db::create_session(&state.pool, &user, &session, now).await?;
-    let session_cookie = HeaderValue::from_str(&state.auth.session_cookie(&session.token))
-        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    let public_session = AdministratorSession::new(user.user_id, user.username, session.csrf_token)
-        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    let mut response = Json(public_session).into_response();
-    response
-        .headers_mut()
-        .append(header::SET_COOKIE, session_cookie);
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, private, max-age=0"),
-    );
-    Ok(response)
-}
-
-async fn logout(
-    State(state): State<WorkerState>,
-    Extension(identity): Extension<InternalIdentity>,
-) -> AppResult<Response> {
-    db::revoke_session(&state.pool, &identity.session_id, db::now_micros()?).await?;
-    let session_cookie = HeaderValue::from_str(&state.auth.expired_session_cookie())
-        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .append(header::SET_COOKIE, session_cookie);
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, private, max-age=0"),
-    );
-    Ok(response)
-}
-
-async fn session(
-    State(state): State<WorkerState>,
-    Extension(identity): Extension<InternalIdentity>,
-) -> AppResult<Response> {
-    let csrf_token = sarmg_admin_auth::random_token()
-        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    db::rotate_session_csrf(
-        &state.pool,
-        &identity.session_id,
-        &crate::auth::token_hash(&csrf_token),
-        db::now_micros()?,
-    )
-    .await?;
-    let public_session = AdministratorSession::new(identity.subject, identity.username, csrf_token)
-        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
-    let mut response = Json(public_session).into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, private, max-age=0"),
-    );
-    Ok(response)
-}
-
-fn is_mutation(method: &Method) -> bool {
-    !matches!(
-        *method,
-        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
-    )
-}
-
-fn verify_mutation_request(
-    headers: &HeaderMap,
-    uri: &Uri,
-    expected_csrf_hash: &[u8],
-    origin_mode: sarmg_admin_auth::AdministratorOriginMode,
-) -> AppResult<()> {
-    let csrf_values = header_values(headers, sarmg_admin_auth::CSRF_HEADER);
-    sarmg_admin_auth::require_csrf_token_matches_hash(&csrf_values, expected_csrf_hash)
-        .map_err(|_| AppError::Forbidden("invalid CSRF token".into()))?;
-    verify_same_origin(headers, uri, origin_mode)
-}
-
-fn verify_same_origin(
-    headers: &HeaderMap,
-    uri: &Uri,
-    origin_mode: sarmg_admin_auth::AdministratorOriginMode,
-) -> AppResult<()> {
-    let origins = header_values(headers, header::ORIGIN.as_str());
-    let mut hosts = header_values(headers, header::HOST.as_str());
-    if let Some(authority) = uri.authority() {
-        hosts.push(authority.as_str().as_bytes().to_vec());
-    }
-    let sites = header_values(headers, sarmg_admin_auth::SEC_FETCH_SITE_HEADER);
-    sarmg_admin_auth::require_administrator_same_origin(origin_mode, &origins, &hosts, &sites)
-        .map(|_| ())
-        .map_err(|_| AppError::Forbidden("cross-origin request rejected".into()))
-}
-
-/// Axum adapter for the Foundation policy: retain every raw field-line so
-/// duplicate or comma-joined security headers cannot be normalized away.
-fn header_values(headers: &HeaderMap, name: &str) -> Vec<Vec<u8>> {
-    headers
-        .get_all(name)
-        .iter()
-        .map(|value| value.as_bytes().to_vec())
-        .collect()
 }
 
 async fn list_hosts(State(state): State<WorkerState>) -> AppResult<Json<Vec<HostInfo>>> {
@@ -957,6 +803,7 @@ pub async fn probe_loop(state: WorkerState) {
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::http::Method;
     use http_body_util::BodyExt;
     use sarmg_error::ErrorEnvelope;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -976,12 +823,7 @@ mod tests {
         let state = WorkerState::new(
             pool,
             SecretBox::new("test", [2; 32]).unwrap(),
-            InternalAuth::new(
-                std::time::Duration::from_secs(60),
-                std::time::Duration::from_secs(30),
-                false,
-            )
-            .unwrap(),
+            false,
             test_static_dir(),
         )
         .unwrap();
@@ -1036,7 +878,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uri_authority_is_used_only_when_host_is_absent() {
+    async fn login_requires_an_explicit_matching_host_header() {
         let application = test_router().await;
         let body = r#"{"username":"admin","password":"bad-password"}"#;
 
@@ -1053,7 +895,7 @@ mod tests {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::UNAUTHORIZED
+            StatusCode::FORBIDDEN
         );
 
         let ambiguous = Request::post("http://localhost/api/v2/auth/login")
@@ -1065,12 +907,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             application.oneshot(ambiguous).await.unwrap().status(),
-            StatusCode::FORBIDDEN
+            StatusCode::UNAUTHORIZED
         );
     }
 
     #[tokio::test]
-    async fn login_policy_violations_are_bad_requests() {
+    async fn login_policy_violations_share_the_credentials_failure() {
         for body in [
             r#"{"username":"admin@example.com","password":"correct-password"}"#,
             r#"{"username":"admin","password":"too-short"}"#,
@@ -1088,7 +930,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
     }
 
@@ -1109,7 +951,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1166,18 +1008,18 @@ mod tests {
             .await
             .unwrap();
         db::initialize_empty(&pool).await.unwrap();
-        db::ensure_admin_user(&pool, "admin", Some("correct horse battery staple"))
+        AdministratorService::new(SqliteAdministratorStore::new(pool.clone()))
+            .bootstrap_administrator(
+                "admin",
+                "correct horse battery staple",
+                u64::try_from(db::now_micros().unwrap()).unwrap(),
+            )
             .await
             .unwrap();
         let state = WorkerState::new(
             pool.clone(),
             SecretBox::new("test", [2; 32]).unwrap(),
-            InternalAuth::new(
-                std::time::Duration::from_secs(60),
-                std::time::Duration::from_secs(30),
-                false,
-            )
-            .unwrap(),
+            false,
             test_static_dir(),
         )
         .unwrap();
@@ -1213,7 +1055,7 @@ mod tests {
             .map(|value| value.to_str().unwrap().split(';').next().unwrap())
             .collect::<Vec<_>>()
             .join("; ");
-        assert!(cookie.contains("sunshine_session="));
+        assert!(cookie.contains("sarmg-sunshine-manager-session="));
         assert!(!cookie.contains("sunshine_csrf="));
         let login_body: Value =
             serde_json::from_slice(&login.into_body().collect().await.unwrap().to_bytes()).unwrap();
@@ -1233,16 +1075,20 @@ mod tests {
         assert_eq!(login_body["role"], "admin");
         let csrf = login_body["csrf_token"].as_str().unwrap().to_string();
         assert!(!csrf.is_empty());
-        let stored_hash: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM auth_sessions")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let stored_hash: Vec<u8> =
+            sqlx::query_scalar("SELECT token_hash FROM _sarmg_admin_sessions")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let session_token = cookie
             .split("; ")
-            .find_map(|value| value.strip_prefix("sunshine_session="))
+            .find_map(|value| value.strip_prefix("sarmg-sunshine-manager-session="))
             .unwrap();
         assert_eq!(stored_hash.len(), 32);
-        assert_eq!(crate::auth::token_hash(session_token), stored_hash);
+        assert_eq!(
+            sarmg_admin_auth::token_hash(session_token).as_slice(),
+            stored_hash
+        );
         assert_ne!(session_token.as_bytes(), stored_hash);
 
         for (name, value) in [
@@ -1317,8 +1163,7 @@ mod tests {
         let envelope: ErrorEnvelope =
             serde_json::from_slice(&missing_csrf.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert_eq!(envelope.code.as_str(), "forbidden");
-        assert_eq!(envelope.message, "invalid CSRF token");
+        assert_eq!(envelope.code.as_str(), "auth.csrf_rejected");
         assert!(!envelope.retryable);
         assert!(envelope.request_id.is_none() && envelope.details.is_empty());
 
@@ -1364,7 +1209,7 @@ mod tests {
         let envelope: ErrorEnvelope =
             serde_json::from_slice(&revoked.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert_eq!(envelope.code.as_str(), "unauthorized");
+        assert_eq!(envelope.code.as_str(), "auth.session_required");
         assert!(!envelope.retryable);
     }
 
@@ -1376,7 +1221,12 @@ mod tests {
             .await
             .unwrap();
         db::initialize_empty(&pool).await.unwrap();
-        db::ensure_admin_user(&pool, "admin", Some("correct horse battery staple"))
+        AdministratorService::new(SqliteAdministratorStore::new(pool.clone()))
+            .bootstrap_administrator(
+                "admin",
+                "correct horse battery staple",
+                u64::try_from(db::now_micros().unwrap()).unwrap(),
+            )
             .await
             .unwrap();
         let secrets = SecretBox::new("test", [12; 32]).unwrap();
@@ -1394,23 +1244,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let state = WorkerState::new(
-            pool.clone(),
-            secrets,
-            InternalAuth::new(
-                std::time::Duration::from_secs(60),
-                std::time::Duration::from_secs(30),
-                false,
-            )
-            .unwrap(),
-            test_static_dir(),
+        let state = WorkerState::new(pool.clone(), secrets, false, test_static_dir()).unwrap();
+        let actor: String = sqlx::query_scalar(
+            "SELECT administrator_id FROM _sarmg_administrators WHERE username='admin'",
         )
+        .fetch_one(&pool)
+        .await
         .unwrap();
-        let actor: String =
-            sqlx::query_scalar("SELECT user_id FROM auth_users WHERE username='admin'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
         let existing_cover = state
             .operations
             .enqueue(

@@ -3,8 +3,8 @@
 ## 4.1 登录准入
 
 ```text
-TCP peer -> body limit -> username candidate -> source/account budgets
- -> bounded Argon2 -> random Session/CSRF -> digest in SQLite
+TCP peer -> Foundation Axum adapter -> username candidate -> source/account budgets
+ -> Foundation bounded Argon2 -> random Session/CSRF -> digest in SQLite
 ```
 
 登录 JSON 精确为 `{username,password}`。username 候选限 1–64 个可打印 ASCII 字节；Server 只做
@@ -16,7 +16,7 @@ TCP peer -> body limit -> username candidate -> source/account budgets
 
 浏览器只持有 HttpOnly 随机 Session Cookie，并把登录或恢复响应中的 CSRF plaintext 保留在内存；SQLite
 Session 表只保存两个 token 的摘要、管理员 user ID、创建/最后使用和撤销状态，canonical username 来自
-关联的 `auth_users` 行。恢复 Session
+关联的 `_sarmg_administrators` 行。恢复 Session
 响应精确包含 `{authenticated,user_id,username,role,csrf_token}`，并生成新的 CSRF token、替换
 服务端摘要，被替换 token 立即失效。空闲与绝对 TTL 同时生效；登出在 Server 端撤销。
 

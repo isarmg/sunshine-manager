@@ -142,6 +142,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.92"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1922,8 +1933,8 @@ dependencies = [
 
 [[package]]
 name = "sarmg-admin-auth"
-version = "0.3.0"
-source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=1fe326081cfd896f05ff502e80f99504797c14c6#1fe326081cfd896f05ff502e80f99504797c14c6"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
 dependencies = [
  "argon2",
  "base64",
@@ -1934,9 +1945,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "sarmg-admin-axum"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
+dependencies = [
+ "axum",
+ "sarmg-admin-auth",
+ "sarmg-admin-core",
+ "sarmg-contracts",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "sarmg-admin-core"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
+dependencies = [
+ "async-trait",
+ "sarmg-admin-auth",
+ "sarmg-contracts",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "sarmg-admin-sqlite"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
+dependencies = [
+ "async-trait",
+ "sarmg-admin-auth",
+ "sarmg-admin-core",
+ "sqlx",
+ "thiserror",
+]
+
+[[package]]
 name = "sarmg-contracts"
-version = "0.3.0"
-source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=1fe326081cfd896f05ff502e80f99504797c14c6#1fe326081cfd896f05ff502e80f99504797c14c6"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
 dependencies = [
  "sarmg-admin-auth",
  "sarmg-error",
@@ -1948,8 +1997,8 @@ dependencies = [
 
 [[package]]
 name = "sarmg-error"
-version = "0.3.0"
-source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=1fe326081cfd896f05ff502e80f99504797c14c6#1fe326081cfd896f05ff502e80f99504797c14c6"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
 dependencies = [
  "serde",
  "serde_json",
@@ -1957,9 +2006,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sarmg-platform-db"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
+dependencies = [
+ "sarmg-schema-identity",
+ "sarmg-sqlite",
+ "sarmg-state-file",
+ "sqlx",
+ "thiserror",
+]
+
+[[package]]
 name = "sarmg-schema-identity"
-version = "0.3.0"
-source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=1fe326081cfd896f05ff502e80f99504797c14c6#1fe326081cfd896f05ff502e80f99504797c14c6"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
 dependencies = [
  "serde",
  "sha2",
@@ -1968,16 +2029,26 @@ dependencies = [
 
 [[package]]
 name = "sarmg-server-target"
-version = "0.3.0"
-source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=1fe326081cfd896f05ff502e80f99504797c14c6#1fe326081cfd896f05ff502e80f99504797c14c6"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
 
 [[package]]
 name = "sarmg-sqlite"
-version = "0.3.0"
-source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=1fe326081cfd896f05ff502e80f99504797c14c6#1fe326081cfd896f05ff502e80f99504797c14c6"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
 dependencies = [
  "sarmg-schema-identity",
  "sqlx",
+ "thiserror",
+]
+
+[[package]]
+name = "sarmg-state-file"
+version = "0.4.0"
+source = "git+https://github.com/isarmg/sarmg-foundation.git?rev=0e1be10273fd6abf72e0d0eeb24cbb1120572486#0e1be10273fd6abf72e0d0eeb24cbb1120572486"
+dependencies = [
+ "rustix",
+ "sarmg-server-target",
  "thiserror",
 ]
 
@@ -2435,7 +2506,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sunshine-manager"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2451,8 +2522,12 @@ dependencies = [
  "rusqlite",
  "rustix",
  "sarmg-admin-auth",
+ "sarmg-admin-axum",
+ "sarmg-admin-core",
+ "sarmg-admin-sqlite",
  "sarmg-contracts",
  "sarmg-error",
+ "sarmg-platform-db",
  "sarmg-schema-identity",
  "sarmg-server-target",
  "sarmg-sqlite",

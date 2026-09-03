@@ -1,9 +1,9 @@
 {
   "manifest_format": "sunshine-manager-release-v1",
   "application": "sunshine-manager",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "api_prefix": "/api/v2",
-  "schema_revision": 1,
-  "schema_sha256": "a717bcd5a591e7f7cc6da5826af88ad0deab2fdc339ce4649ad84f21ea879dbc",
+  "schema_revision": 2,
+  "schema_sha256": "c9dedb33dd7a5ad613e762eb135a7aa5184ce1df52166459bee7b3485b4b3be3",
   "target": "x86_64-unknown-linux-gnu"
 }

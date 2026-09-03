@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and publish one immutable, source-bound Sunshine Manager 0.7 archive."""
+"""Build and publish one immutable, source-bound Sunshine Manager 0.8.0 archive."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from typing import NoReturn
 
 
 APPLICATION = "sunshine-manager"
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 TARGET = "x86_64-unknown-linux-gnu"
 TAG = f"v{VERSION}"
 

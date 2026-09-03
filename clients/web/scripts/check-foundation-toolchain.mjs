@@ -8,8 +8,8 @@ const lock = JSON.parse(
   readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"),
 );
 const foundationReleaseBase =
-  "https://github.com/isarmg/sarmg-foundation/releases/download/v0.3.0";
-const foundationVersion = "0.3.0";
+  "https://github.com/isarmg/sarmg-foundation/releases/download/v0.4.0";
+const foundationVersion = "0.4.0";
 const foundationPackages = ["admin-web", "contracts", "design-tokens", "http-client"];
 
 const nodeVersion = readFileSync(

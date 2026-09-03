@@ -15,7 +15,7 @@ from typing import NoReturn
 
 
 APPLICATION = "sunshine-manager"
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 TARGET = "x86_64-unknown-linux-gnu"
 CONTRACT_FORMAT = "sunshine-manager-release-v1"
 MANIFEST_FORMAT = "sunshine-manager-files-v1"
@@ -79,23 +79,23 @@ def read_identity(binary: Path) -> tuple[dict[str, object], bytes]:
         or identity["application"] != APPLICATION
         or identity["version"] != VERSION
         or identity["api_prefix"] != "/api/v2"
-        or identity["schema_revision"] != 1
+        or identity["schema_revision"] != 2
         or identity["target"] != TARGET
         or not isinstance(identity["schema_sha256"], str)
         or SHA256.fullmatch(identity["schema_sha256"]) is None
         or not isinstance(identity["source_revision"], str)
         or FULL_REVISION.fullmatch(identity["source_revision"]) is None
     ):
-        fail("release binary is not the exact bound Sunshine Manager 0.7 identity")
+        fail("release binary is not the exact bound Sunshine Manager 0.8.0 identity")
     return identity, encoded
 
 
 def main() -> None:
     if len(sys.argv) != 2:
-        fail("usage: write-release-manifest.py /absolute/releases/0.7.0")
+        fail("usage: write-release-manifest.py /absolute/releases/0.8.0")
     root = Path(sys.argv[1])
     if not root.is_absolute() or root.name != VERSION or root.parent.name != "releases":
-        fail("root must be an absolute releases/0.7.0 directory")
+        fail("root must be an absolute releases/0.8.0 directory")
     if root.resolve(strict=True) != root:
         fail("release root must not traverse symbolic links")
     root_stat = root.lstat()
