@@ -20,12 +20,15 @@ jobs:
           persist-credentials: false
       - name: Enforce workflow supply-chain policy
         run: python3 scripts/check-workflow-supply-chain.py
-      - name: Reject runtime coupling and container manifests
+      - name: Reject obsolete runtime coupling and container manifests
         shell: bash
         run: |
           set -euo pipefail
 
-          coupling_pattern='UNION_|X-Union-|PluginManifest|ProcessContext|sarmg[-_]platform|@unionc|unionc_'
+          # Foundation packages such as sarmg-platform-db are intentional
+          # build-time dependencies. This gate rejects the retired runtime
+          # container/plugin coupling only.
+          coupling_pattern='UNION_|X-Union-|PluginManifest|ProcessContext|@unionc|unionc_'
           coupling_matches="$(
             git grep -nE "$coupling_pattern" -- \
               ':!.github/workflows/independence.yml' \
