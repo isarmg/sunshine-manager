@@ -94,7 +94,7 @@
 | SUN-086 | 封面下载 no-redirect、有界 timeout/8 MiB、图片 MIME | cover client | 保障 | 中 | 可通过跳转绕过 allowlist或用慢/大正文耗尽资源 | 30x、错 MIME、慢流、分块超限 |
 | SUN-087 | 内部回取 token 30 秒一次性并绑定 Host/operation/peer | `CoverProxy::publish/take`、internal route | 保障 | 高 | token 可跨 Host 重放、长期读取或被非目标 Sunshine 使用 | 二次使用、过期、错四元组 |
 | SUN-088 | 内存封面最多 16 项、Host 解析地址最多 16 个 | `MAX_ENTRIES`、`MAX_HOST_ADDRESSES` | 保障 | 中 | 大量上传或 DNS 放大可耗尽内存/连接尝试 | 第 17 项/地址、消费后释放 |
-| SUN-089 | `/health/live` 与 `/health/ready` 独立于管理员 API；ready 只重验当前 Schema | `live`、`ready`、`db::ready` | 开发运维 | 低 | 编排器无法区分进程存活和 Schema readiness；它不代表 worker、Host 或全部密文实时健康 | 匿名访问、Schema drift 503、Host/worker 故障仍说明边界 |
+| SUN-089 | `/healthz` 与 `/readyz` 独立于管理员 API；ready 只重验当前 Schema | `live`、`ready`、`db::ready` | 开发运维 | 低 | 编排器无法区分进程存活和 Schema readiness；它不代表 worker、Host 或全部密文实时健康 | 匿名访问、Schema drift 503、Host/worker 故障仍说明边界 |
 | SUN-090 | `doctor` 验证配置/static、数据库 identity/integrity/FK、回滚写探针和全部密文 | `ServeConfig::from_runtime`、`db::doctor` | 开发运维 | 中 | 部署验收与事故定位只能靠启动或手工 SQL；命令会执行回滚事务但不留业务探针，也不验证整个 release tree | 健康/错 key/Schema/FK/不可写/static 错误、探针行不留存 |
 | SUN-091 | 源配置固定 `config/`，部署资产固定 `deploy/`，正式 env 固定 `/etc/isarmg/sunshine-manager.env` | repository/deploy convention | 开发运维 | 低 | 多项目安装和审查需要记忆不同目录，自动化容易漏项 | 文档/脚本/service 路径扫描 |
 | SUN-092 | systemd 使用专用账户、受保护环境、固定 release 路径和 hardening | `deploy/sunshine-manager.service` | 保障 | 中 | 服务获得不必要主机权限，或读取可变工作树 | `systemd-analyze verify`、权限、负面写入 |
@@ -320,7 +320,7 @@ handler 中调用一次 Sunshine 并返回 200 不构成完整功能。
 
 | Route 组 | Method/路径 | 身份与请求边界 | 权威状态/结果 |
 |---|---|---|---|
-| 健康 | `GET /health/live`、`GET /health/ready` | 匿名、无业务数据 | 进程与 readiness，不泄露 Host |
+| 健康 | `GET /healthz`、`GET /readyz` | 匿名、无业务数据 | 进程与 readiness，不泄露 Host |
 | 认证 | `POST /api/v2/auth/login` | 匿名但需同源、16 KiB、登录预算 | `AdministratorSession(role=admin)` + HttpOnly Cookie |
 | 认证 | `GET /api/v2/auth/session` | Session | 轮换 CSRF 摘要并返回新 token |
 | 认证 | `POST /api/v2/auth/logout` | Session + CSRF + 同源 | 撤销 DB Session，204，过期 Cookie |

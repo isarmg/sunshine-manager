@@ -203,7 +203,7 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
         sarmg_server_runtime::ServerRuntime::builder(sarmg_server_runtime::ProductDescriptor {
             id: "sunshine-manager".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            foundation_revision: "394c0201d85c5a331cded87db4af8fa01f6b6258".to_owned(),
+            foundation_revision: "1e889d08fa69fcf2b5fffe45e8cc42b68218f4f1".to_owned(),
             profile: "server-control-plane".to_owned(),
             capabilities: vec![
                 "admin-persistent".to_owned(),

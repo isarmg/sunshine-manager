@@ -163,9 +163,9 @@ def relocated_smoke(extracted: Path, temporary: Path) -> None:
                     break
                 try:
                     with urllib.request.urlopen(
-                        f"http://127.0.0.1:{port}/health/live", timeout=1
+                        f"http://127.0.0.1:{port}/readyz", timeout=1
                     ) as response:
-                        ready = response.status == 200
+                        ready = response.status == 200 and response.read(128) == b'{"ready":true}'
                 except (urllib.error.URLError, TimeoutError):
                     pass
                 if ready:
