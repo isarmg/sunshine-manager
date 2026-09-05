@@ -127,8 +127,8 @@ async fn validate_encrypted_values(pool: &SqlitePool, secrets: &SecretBox) -> an
 
     let mut operation_cursor = String::new();
     loop {
-        let rows = sqlx::query_as::<_, (String, String, Vec<u8>, String)>(
-            "SELECT operation_id,action,request_fingerprint,request_ciphertext FROM operations \
+        let rows = sqlx::query_as::<_, (String, String, Vec<u8>, Vec<u8>)>(
+            "SELECT operation_id,action,request_fingerprint,request_payload FROM _sarmg_operations \
              WHERE operation_id > ? ORDER BY operation_id LIMIT 128",
         )
         .bind(&operation_cursor)
@@ -137,7 +137,16 @@ async fn validate_encrypted_values(pool: &SqlitePool, secrets: &SecretBox) -> an
         if rows.is_empty() {
             break;
         }
-        for (operation_id, action, fingerprint, ciphertext) in &rows {
+        for (operation_id, action, fingerprint, payload) in &rows {
+            let Ok(payload) = serde_json::from_slice::<serde_json::Value>(payload) else {
+                return Ok(false);
+            };
+            let Some(ciphertext) = payload
+                .get("request_ciphertext")
+                .and_then(|value| value.as_str())
+            else {
+                return Ok(false);
+            };
             let Ok(plaintext) = secrets.decrypt_operation_request(operation_id, action, ciphertext)
             else {
                 return Ok(false);
@@ -556,7 +565,7 @@ mod tests {
     async fn readiness_requires_the_operation_and_outbox_schema() {
         let pool = current_pool().await;
         assert!(ready(&pool).await);
-        sqlx::query("DROP TABLE audit_outbox")
+        sqlx::query("DROP TABLE _sarmg_operation_audit_outbox")
             .execute(&pool)
             .await
             .unwrap();

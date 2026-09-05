@@ -27,11 +27,11 @@ asset 和 group/world writable 内容。
 python3 scripts/package-release.py /absolute/release-output
 ```
 
-本迁移工作树联调 Foundation 0.4.0 Rust crate 和本地生成的四个 0.4.0 npm tarball；Web manifest
-与 lockfile 已预先绑定将要发布的 `v0.4.0` URL 和这些 tarball 的 SHA-512 integrity。正式发行前必须
-等 Foundation `v0.4.0` 指向不可变完整 revision，将 Cargo 的联调 `path` 统一替换为该 revision，
-并在无 sibling Foundation 的干净环境执行 `npm ci`。在这些条件满足前，不得将 Sunshine 0.8.0
-工作树标记为正式发行。
+当前工作树通过本地路径联调 Foundation Rust 和八个 Web 包：contracts、http-client、admin-web、admin-ui、
+admin-shell、design-tokens、web-fonts、web-toolchain。它尚未绑定新的不可变发行版，不能作为独立发行树交付。
+正式发行前必须发布一个新的不可变 Foundation revision（不得改写既有 tag），统一 Cargo 来源和 npm tarball
+URL/integrity，更新消费者 gate，并在无 sibling Foundation 的干净环境执行 Cargo 构建与 `npm ci`。
+这些条件未满足前，不得将 Sunshine 0.8.0 工作树标记为正式发行。
 Foundation 不是生产运行服务，发行树中不增加其 daemon、配置或 socket。
 
 输出已存在时拒绝覆盖。安装：
@@ -97,12 +97,12 @@ constant-time 比较；裸 SHA-256 或另一 master key 生成的 fingerprint �
 业务探针行；它不是纯只读命令，因为会执行随后回滚的写事务。
 
 其中 WAL/FULL synchronous/foreign-key/busy-timeout 连接基线、checkpoint、integrity/FK 和 Schema 指纹算法来自
-Foundation 0.4；数据库文件权限、main/WAL/journal 私有代际快照预检、DDL/init、失败清理、运行/maintenance
+Foundation；数据库文件权限、main/WAL/journal 私有代际快照预检、DDL/init、失败清理、运行/maintenance
 锁仍由 Sunshine Manager 负责。预检只读取源 `-shm` 的类型与身份，不在源库上建立 SQLite 连接；因此非当前
 库拒绝不会改写 SHM 锁字节。故障定位时不要绕过任一层，也不要用 Foundation API 现场创建或转换非当前库。
 
 若 Schema 不符，不得手改 metadata；若解密失败，先确认 key ID、key 文件来源和权限，不得添加“尝试
-其他 key”、空 AAD 或忽略记录身份的 fallback。即使 envelope 仍以 `sunshine:v1:` 开头，也不能据此前缀
+其他 key”、空 AAD 或忽略记录身份的 fallback。即使 envelope 仍以 `sunshine:sgev1:` 开头，也不能据此前缀
 判定它属于当前合同；AES-GCM tag 必须在当前确定性 AAD 下验证通过。
 同一 master key 除直接供 AES 使用外，还派生两把 HMAC key，但不会暴露通用 HMAC key API：request fingerprint
 和 Idempotency-Key hash 各有固定且不同的 HKDF info。换 master key 会同时改变密文可用性和两个 HMAC 域，
@@ -141,8 +141,14 @@ re-encryption，产品仓也不增加兼容分支。
 API 错误必须同时检查 HTTP status 与稳定 `code`；`message` 只用于展示。若 Web 报
 `invalid_error_response`，先检查代理是否改写 JSON/content-type 或服务端是否返回非当前错误形状；若为
 `invalid_response_shape`，说明 2xx 正文已偏离当前端点合同，不应在浏览器添加宽松分支。
-`request_id` 是 Foundation envelope 的可选字段，本版本 Server 不生成；需要链路关联时应由可信 proxy/
-日志平台生成并在其自身受保护日志中维护，不能伪造为产品当前 API 的必填字段。
+Foundation Runtime 校验传入的 `x-request-id`，缺失时生成并写入响应头及错误 envelope；受保护诊断也带 Request ID。
+共享 Web Shell 只显示安全提示和校验后的关联 ID，不显示内部异常文本。
+
+持久操作每次领取使用唯一 owner；执行最多 90 秒，租约 120 秒。完成写入要求当前未过期 owner；
+远端效果可能发生而提交失败时，仅将捕获的 claim 标为 Unknown，不重复执行。退出停止领取并有界等待，
+中止的 Running 由独占启动恢复标为 Unknown。人工处理支持 confirmed_succeeded、confirmed_failed 和
+unable_to_confirm；最后一项仅 Unknown → DeadLetter，所有决定均不重放原操作。
+人工处理与操作者审计、审计物化与 outbox 确認分别在同一事务中提交。
 
 ## 9. 安全事件
 

@@ -194,23 +194,74 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
         tracing::warn!(%error, "initial audit outbox delivery failed; background retry will continue");
     }
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    let health_pool = state.pool.clone();
+    let probe_state = state.clone();
+    let operation_manager = state.operation_manager().clone();
+    let audit_pool = state.pool.clone();
+    let operations_pool = state.pool.clone();
+    let runtime =
+        sarmg_server_runtime::ServerRuntime::builder(sarmg_server_runtime::ProductDescriptor {
+            id: "sunshine-manager".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            foundation_revision: "394c0201d85c5a331cded87db4af8fa01f6b6258".to_owned(),
+            profile: "server-control-plane".to_owned(),
+            capabilities: vec![
+                "admin-persistent".to_owned(),
+                "server-runtime".to_owned(),
+                "server-health".to_owned(),
+                "durable-operations".to_owned(),
+                "secret-envelope".to_owned(),
+            ],
+        })
+        .with_schema_identity(sunshine_manager::database_schema::current_schema_identity())
+        .register_metric(
+            sarmg_server_runtime::DiagnosticMetric::AuditBacklog,
+            move || {
+                let store = sarmg_operations::SqliteOperationStore::new(audit_pool.clone());
+                async move { store.pending_audit_count().await.ok() }
+            },
+        )
+        .register_metric(
+            sarmg_server_runtime::DiagnosticMetric::OperationBacklog,
+            move || {
+                let store = sarmg_operations::SqliteOperationStore::new(operations_pool.clone());
+                async move { store.active_operation_count().await.ok() }
+            },
+        )
+        .register_health_check(
+            "database",
+            sarmg_server_runtime::health_check(move || {
+                let pool = health_pool.clone();
+                async move { db::ready(&pool).await }
+            }),
+        )
+        .register_background_task(
+            "host-probe",
+            sarmg_server_runtime::TaskCriticality::Degrading,
+            move |mut shutdown| async move {
+                tokio::select! {
+                    _ = probe_loop(probe_state) => Ok(()),
+                    _ = shutdown.changed() => Ok(()),
+                }
+            },
+        )
+        .register_background_task(
+            "durable-operations",
+            sarmg_server_runtime::TaskCriticality::Critical,
+            move |shutdown| operation_manager.run_until(shutdown),
+        )
+        .build()
+        .await?;
+    let runtime_handle = runtime.handle();
     tracing::info!(
         bind = %config.bind,
         schema = db::SCHEMA,
         recovered_running_operations = recovered,
         "Sunshine manager ready"
     );
-    let probe = tokio::spawn(probe_loop(state.clone()));
-    let operations = tokio::spawn(state.operation_manager().clone().run());
-    let result = axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown())
-    .await;
-    probe.abort();
-    operations.abort();
-    result?;
+    runtime
+        .serve(listener, router(state, runtime_handle)?)
+        .await?;
     Ok(())
 }
 
@@ -218,22 +269,4 @@ fn current_time_micros() -> anyhow::Result<u64> {
     use std::time::{SystemTime, UNIX_EPOCH};
     u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())
         .map_err(|_| anyhow::anyhow!("current time exceeds administrator timestamp range"))
-}
-
-async fn shutdown() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => tracing::error!(%error, "failed to install SIGTERM handler"),
-        }
-    };
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
 }

@@ -111,11 +111,10 @@ impl WorkerState {
     }
 }
 
-pub fn router(state: WorkerState) -> Router {
-    let health = Router::new()
-        .route("/health/live", get(live))
-        .route("/health/ready", get(ready));
-
+pub fn router(
+    state: WorkerState,
+    runtime: sarmg_server_runtime::RuntimeHandle,
+) -> anyhow::Result<Router> {
     let public_api = Router::new()
         .route(
             "/sunshine/internal/hosts/{host_id}/operations/{operation_id}/covers/{token}",
@@ -125,10 +124,6 @@ pub fn router(state: WorkerState) -> Router {
 
     let protected_api = Router::new()
         .route("/sunshine/operations/{operation_id}", get(operation_get))
-        .route(
-            "/sunshine/operations/{operation_id}/retry",
-            post(operation_retry),
-        )
         .route(
             "/sunshine/operations/{operation_id}/resolve",
             post(operation_resolve),
@@ -169,18 +164,17 @@ pub fn router(state: WorkerState) -> Router {
         .fallback(|| async { StatusCode::NOT_FOUND });
 
     let static_dir = state.static_dir.clone();
-    let administrator = sarmg_admin_axum::administrator_router(
+    let platform = sarmg_server_runtime::platform_router(
+        runtime,
         "sunshine-manager",
         state.administrator_origin_mode,
         Arc::clone(&state.administrator_service),
-    )
-    .expect("static Sunshine administrator adapter configuration is valid");
-    Router::new()
-        .merge(health)
+    )?;
+    Ok(Router::new()
         .nest(API_NAMESPACE, api_namespace)
         .fallback_service(ServeDir::new(static_dir))
         .with_state(state)
-        .merge(administrator)
+        .merge(platform))
 }
 
 async fn authenticate(
@@ -205,30 +199,6 @@ async fn authenticate(
         subject: identity.administrator_id.to_string(),
     });
     next.run(request).await
-}
-
-async fn live(State(state): State<WorkerState>) -> Response {
-    let _ = state;
-    Json(serde_json::json!({ "status": "ok" })).into_response()
-}
-
-async fn ready(State(state): State<WorkerState>) -> Response {
-    let ready = db::ready(&state.pool).await;
-    let response = if ready {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({ "status": "ready" })),
-        )
-            .into_response()
-    } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "status": "not-ready" })),
-        )
-            .into_response()
-    };
-    let _ = state;
-    response
 }
 
 async fn list_hosts(State(state): State<WorkerState>) -> AppResult<Json<Vec<HostInfo>>> {
@@ -622,19 +592,6 @@ async fn operation_get(
     ))
 }
 
-async fn operation_retry(
-    State(state): State<WorkerState>,
-    Extension(identity): Extension<InternalIdentity>,
-    Path(operation_id): Path<String>,
-) -> AppResult<Json<OperationView>> {
-    Ok(Json(
-        state
-            .operations
-            .retry_for_actor(&identity.subject, &operation_id)
-            .await?,
-    ))
-}
-
 async fn operation_resolve(
     State(state): State<WorkerState>,
     Extension(identity): Extension<InternalIdentity>,
@@ -644,7 +601,7 @@ async fn operation_resolve(
     Ok(Json(
         state
             .operations
-            .resolve_for_actor(&identity.subject, &operation_id, body.resolution.as_str())
+            .resolve_for_actor(&identity.subject, &operation_id, body.resolution)
             .await?,
     ))
 }
@@ -813,6 +770,17 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("clients/web")
     }
 
+    fn test_runtime() -> sarmg_server_runtime::RuntimeHandle {
+        sarmg_server_runtime::platform_handle(sarmg_server_runtime::ProductDescriptor {
+            id: "sunshine-manager".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            foundation_revision: "394c0201d85c5a331cded87db4af8fa01f6b6258".to_owned(),
+            profile: "server-control-plane".to_owned(),
+            capabilities: vec!["server-runtime".to_owned()],
+        })
+        .unwrap()
+    }
+
     async fn test_router() -> Router {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -827,20 +795,22 @@ mod tests {
             test_static_dir(),
         )
         .unwrap();
-        router(state).layer(Extension(ConnectInfo(SocketAddr::from((
-            [127, 0, 0, 1],
-            42_000,
-        )))))
+        router(state, test_runtime())
+            .unwrap()
+            .layer(Extension(ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                42_000,
+            )))))
     }
 
     #[tokio::test]
     async fn health_is_public() {
         let live = test_router()
             .await
-            .oneshot(Request::get("/health/live").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(live.status(), StatusCode::OK);
+        assert_eq!(live.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -878,7 +848,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_requires_an_explicit_matching_host_header() {
+    async fn login_uses_one_unambiguous_host_or_uri_authority() {
         let application = test_router().await;
         let body = r#"{"username":"admin","password":"bad-password"}"#;
 
@@ -895,7 +865,7 @@ mod tests {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::FORBIDDEN
+            StatusCode::UNAUTHORIZED
         );
 
         let ambiguous = Request::post("http://localhost/api/v2/auth/login")
@@ -907,7 +877,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             application.oneshot(ambiguous).await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
+            StatusCode::FORBIDDEN
         );
     }
 
@@ -958,6 +928,7 @@ mod tests {
     async fn old_and_unversioned_api_paths_are_not_routes() {
         for (method, path) in [
             (Method::POST, "/api/v1/auth/login"),
+            (Method::POST, "/api/v2/sunshine/operations/removed/retry"),
             (Method::GET, "/api/services/sunshine/hosts"),
             (Method::GET, "/api/sunshine/hosts"),
         ] {
@@ -1023,10 +994,12 @@ mod tests {
             test_static_dir(),
         )
         .unwrap();
-        let application = router(state).layer(Extension(ConnectInfo(SocketAddr::from((
-            [127, 0, 0, 1],
-            42_000,
-        )))));
+        let application = router(state, test_runtime())
+            .unwrap()
+            .layer(Extension(ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                42_000,
+            )))));
 
         let login = application
             .clone()
@@ -1160,12 +1133,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing_csrf.status(), StatusCode::FORBIDDEN);
+        let request_id = missing_csrf.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
         let envelope: ErrorEnvelope =
             serde_json::from_slice(&missing_csrf.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(envelope.code.as_str(), "auth.csrf_rejected");
         assert!(!envelope.retryable);
-        assert!(envelope.request_id.is_none() && envelope.details.is_empty());
+        assert_eq!(envelope.request_id.unwrap().as_str(), request_id);
+        assert!(envelope.details.is_empty());
 
         let missing_origin = application
             .clone()
@@ -1264,10 +1242,12 @@ mod tests {
             )
             .await
             .unwrap();
-        let application = router(state).layer(Extension(ConnectInfo(SocketAddr::from((
-            [127, 0, 0, 1],
-            42_000,
-        )))));
+        let application = router(state, test_runtime())
+            .unwrap()
+            .layer(Extension(ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                42_000,
+            )))));
 
         let login = application
             .clone()
@@ -1397,14 +1377,15 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected);
         }
-        let config_ciphertext: String = sqlx::query_scalar(
-            "SELECT request_ciphertext FROM operations WHERE action='sunshine.config.save'",
+        let config_payload: Vec<u8> = sqlx::query_scalar(
+            "SELECT request_payload FROM _sarmg_operations WHERE action='sunshine.config.save'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert!(!config_ciphertext.contains("first-value"));
-        assert!(!config_ciphertext.contains("second-value"));
+        let config_payload = String::from_utf8(config_payload).unwrap();
+        assert!(!config_payload.contains("first-value"));
+        assert!(!config_payload.contains("second-value"));
 
         let cover_url = format!("/api/v2/sunshine/hosts/{}/covers/upload", host.id);
         for (signature, expected) in [

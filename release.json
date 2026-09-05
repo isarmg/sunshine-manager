@@ -3,7 +3,7 @@
   "application": "sunshine-manager",
   "version": "0.8.0",
   "api_prefix": "/api/v2",
-  "schema_revision": 2,
-  "schema_sha256": "c9dedb33dd7a5ad613e762eb135a7aa5184ce1df52166459bee7b3485b4b3be3",
+  "schema_revision": 4,
+  "schema_sha256": "09c3fbedd7c8bb59fabec99ddaaf3492858afd21de867db4b7160093bb47f3e5",
   "target": "x86_64-unknown-linux-gnu"
 }

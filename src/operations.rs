@@ -1,25 +1,27 @@
 use std::{
-    collections::{HashMap, HashSet},
-    future::Future,
-    pin::Pin,
+    collections::HashMap,
     sync::{Arc, Mutex, MutexGuard, Weak},
     time::Duration,
 };
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
-use tokio::{
-    sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard},
-    task::{JoinError, JoinSet},
-};
+use sha2::{Digest, Sha256};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, watch};
 use uuid::Uuid;
+
+pub use sarmg_operations::OperationState;
+use sarmg_operations::{
+    EnqueueOutcome, NewOperation, OperationContext, OperationExecutor, OperationOutcome,
+    SqliteOperationStore, StoredOperation, Transition,
+};
 
 use crate::{
     client::UpstreamClient,
     cover_policy::CoverUrlPolicy,
     cover_proxy::CoverProxy,
-    crypto::{SecretBox, constant_time_equal_32},
+    crypto::SecretBox,
     db,
     error::{AppError, AppResult},
     model::Host,
@@ -27,14 +29,13 @@ use crate::{
 
 pub use crate::http::{probe_loop, router};
 
+const NAMESPACE: &str = "sunshine.remote";
 const MAX_ACTIVE_HOSTS: usize = 16;
-const DISPATCH_BATCH: i64 = 128;
-const OUTBOX_BATCH: i64 = 128;
+const OUTBOX_BATCH: u32 = 128;
 const IDLE_POLL: Duration = Duration::from_millis(250);
+const EXECUTION_TIMEOUT: Duration = Duration::from_secs(90);
+const OPERATION_LEASE_MICROS: i64 = 120_000_000;
 
-/// Serializes remote mutations for one Sunshine host without blocking
-/// unrelated hosts. The registry stores weak references so removed hosts and
-/// one-off identifiers do not grow it indefinitely.
 #[derive(Clone, Default)]
 pub struct HostMutationLocks {
     locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
@@ -49,7 +50,7 @@ impl HostMutationLocks {
                 Some(lock) => lock,
                 None => {
                     let lock = Arc::new(AsyncMutex::new(()));
-                    locks.insert(host_id.to_string(), Arc::downgrade(&lock));
+                    locks.insert(host_id.to_owned(), Arc::downgrade(&lock));
                     lock
                 }
             }
@@ -63,49 +64,6 @@ impl HostMutationLocks {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationState {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    Unknown,
-    DeadLetter,
-    Resolved,
-}
-
-impl OperationState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Running => "running",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Unknown => "unknown",
-            Self::DeadLetter => "dead_letter",
-            Self::Resolved => "resolved",
-        }
-    }
-
-    fn parse(value: &str) -> AppResult<Self> {
-        match value {
-            "pending" => Ok(Self::Pending),
-            "running" => Ok(Self::Running),
-            "succeeded" => Ok(Self::Succeeded),
-            "failed" => Ok(Self::Failed),
-            "unknown" => Ok(Self::Unknown),
-            "dead_letter" => Ok(Self::DeadLetter),
-            "resolved" => Ok(Self::Resolved),
-            _ => Err(AppError::Internal(anyhow::anyhow!(
-                "invalid stored operation state"
-            ))),
-        }
-    }
-}
-
-/// Deliberately excludes actor, action, request material and upstream error
-/// text. This is the only operation representation returned by HTTP.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OperationView {
     pub operation_id: String,
@@ -153,12 +111,20 @@ impl RemoteOperationRequest {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurablePayload {
+    actor: String,
+    request_ciphertext: String,
+}
+
 #[derive(Clone)]
 pub struct OperationManager {
-    pool: SqlitePool,
+    pool: sqlx::SqlitePool,
+    store: SqliteOperationStore,
     secrets: SecretBox,
     locks: HostMutationLocks,
-    executor: Arc<dyn RemoteOperationExecutor>,
+    executor: Arc<dyn OperationExecutor<Request = (Host, RemoteOperationRequest), Result = Value>>,
     notify: Arc<Notify>,
     cover_url_policy: CoverUrlPolicy,
     cover_proxy: CoverProxy,
@@ -166,12 +132,13 @@ pub struct OperationManager {
 
 impl OperationManager {
     pub fn new(
-        pool: SqlitePool,
+        pool: sqlx::SqlitePool,
         secrets: SecretBox,
         locks: HostMutationLocks,
         upstream: UpstreamClient,
     ) -> Self {
         Self {
+            store: SqliteOperationStore::new(pool.clone()),
             pool,
             secrets,
             locks,
@@ -199,12 +166,6 @@ impl OperationManager {
         self.locks.lock(host_id).await
     }
 
-    #[cfg(test)]
-    fn with_executor(mut self, executor: Arc<dyn RemoteOperationExecutor>) -> Self {
-        self.executor = executor;
-        self
-    }
-
     pub async fn find_idempotent(
         &self,
         actor: &str,
@@ -214,16 +175,31 @@ impl OperationManager {
     ) -> AppResult<Option<OperationView>> {
         validate_idempotency_key(idempotency_key)?;
         validate_actor(actor)?;
-        let plaintext =
-            serde_json::to_string(request).map_err(|error| AppError::Internal(error.into()))?;
-        let request_fingerprint = self.secrets.operation_request_fingerprint(&plaintext);
-        let key_hash = self.secrets.operation_idempotency_key_hash(idempotency_key);
-        let Some(existing) =
-            find_existing(&self.pool, actor, host_id, request.action(), &key_hash).await?
+        let plaintext = serde_json::to_string(request).map_err(internal)?;
+        let fingerprint = self.secrets.operation_request_fingerprint(&plaintext);
+        let digest = scoped_idempotency_digest(
+            actor,
+            host_id,
+            request.action(),
+            &self.secrets.operation_idempotency_key_hash(idempotency_key),
+        );
+        let Some(existing) = self
+            .store
+            .get_by_idempotency(NAMESPACE, &digest)
+            .await
+            .map_err(internal)?
         else {
             return Ok(None);
         };
-        compare_existing(existing, &request_fingerprint).map(Some)
+        sarmg_operations::validate_idempotency(&existing.operation, &digest, &fingerprint)
+            .map_err(|error| match error {
+                sarmg_operations::Error::IdempotencyConflict => AppError::Conflict(
+                    "Idempotency-Key was already used with a different request".into(),
+                ),
+                other => AppError::Internal(other.into()),
+            })?;
+        ensure_actor(&existing, actor)?;
+        Ok(Some(operation_view(existing)))
     }
 
     pub async fn enqueue(
@@ -235,494 +211,517 @@ impl OperationManager {
     ) -> AppResult<OperationView> {
         validate_idempotency_key(idempotency_key)?;
         validate_actor(actor)?;
-
-        let plaintext =
-            serde_json::to_string(&request).map_err(|error| AppError::Internal(error.into()))?;
-        let request_fingerprint = self.secrets.operation_request_fingerprint(&plaintext);
-        let key_hash = self.secrets.operation_idempotency_key_hash(idempotency_key);
-        let action = request.action();
-        if let Some(existing) = find_existing(&self.pool, actor, host_id, action, &key_hash).await?
-        {
-            return compare_existing(existing, &request_fingerprint);
-        }
-
         db::get_host(&self.pool, &self.secrets, host_id).await?;
+        let plaintext = serde_json::to_string(&request).map_err(internal)?;
+        let request_fingerprint = self.secrets.operation_request_fingerprint(&plaintext);
+        let action = request.action();
+        let idempotency_digest = scoped_idempotency_digest(
+            actor,
+            host_id,
+            action,
+            &self.secrets.operation_idempotency_key_hash(idempotency_key),
+        );
         let operation_id = format!("op_{}", Uuid::new_v4());
-        let ciphertext =
-            self.secrets
-                .encrypt_operation_request(&operation_id, action, &plaintext)?;
-        let outbox_id = format!("out_{}", Uuid::new_v4());
-        let now = db::now_micros()?;
-
-        let mut transaction = self.pool.begin().await?;
-        let inserted = sqlx::query(
-            r#"INSERT INTO operations(
-                   operation_id,actor,host_id,action,idempotency_key_hash,
-                   request_fingerprint,request_ciphertext,state,attempt,
-                   created_at_micros,updated_at_micros
-               ) VALUES(?,?,?,?,?,?,?,'pending',0,?,?)
-               ON CONFLICT(actor,host_id,action,idempotency_key_hash) DO NOTHING"#,
-        )
-        .bind(&operation_id)
-        .bind(actor)
-        .bind(host_id)
-        .bind(action)
-        .bind(key_hash.as_slice())
-        .bind(request_fingerprint.as_slice())
-        .bind(ciphertext)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-
-        let view = if inserted.rows_affected() == 1 {
-            insert_outbox(
-                &mut transaction,
-                &outbox_id,
+        let payload = DurablePayload {
+            actor: actor.to_owned(),
+            request_ciphertext: self.secrets.encrypt_operation_request(
                 &operation_id,
-                "requested",
-                &format!("{action}.requested"),
-                host_id,
-                actor,
-                &format!("operation_id={operation_id} state=pending attempt=0"),
-                now,
-            )
-            .await?;
-            OperationView {
-                operation_id,
-                state: OperationState::Pending,
-                attempt: 0,
-                max_attempts: 3,
-                created_at_micros: now,
-                updated_at_micros: now,
-                started_at_micros: None,
-                completed_at_micros: None,
-                resolution: None,
-            }
-        } else {
-            let existing =
-                find_existing_in_transaction(&mut transaction, actor, host_id, action, &key_hash)
-                    .await?;
-            match compare_existing(existing, &request_fingerprint) {
-                Ok(view) => view,
-                Err(error) => {
-                    transaction.rollback().await?;
-                    return Err(error);
-                }
-            }
+                action,
+                &plaintext,
+            )?,
         };
-        transaction.commit().await?;
+        let now = db::now_micros()?;
+        let outcome = self
+            .store
+            .enqueue(NewOperation {
+                operation_id,
+                namespace: NAMESPACE.into(),
+                target_key: host_id.to_owned(),
+                action: action.into(),
+                idempotency_digest,
+                request_fingerprint,
+                request_payload: serde_json::to_vec(&payload).map_err(internal)?,
+                max_attempts: 3,
+                not_before_micros: now,
+                created_at_micros: now,
+            })
+            .await
+            .map_err(|error| match error {
+                sarmg_operations::Error::IdempotencyConflict => AppError::Conflict(
+                    "Idempotency-Key was already used with a different request".into(),
+                ),
+                other => AppError::Internal(other.into()),
+            })?;
+        let stored = match outcome {
+            EnqueueOutcome::Created(value) | EnqueueOutcome::Existing(value) => value,
+        };
+        ensure_actor(&stored, actor)?;
         self.notify.notify_one();
-        Ok(view)
+        Ok(operation_view(stored))
     }
 
     pub async fn get_for_actor(&self, actor: &str, operation_id: &str) -> AppResult<OperationView> {
-        let stored = sqlx::query_as::<_, StoredOperationView>(
-            r#"SELECT operation_id,state,attempt,max_attempts,created_at_micros,updated_at_micros,
-                      started_at_micros,completed_at_micros,resolution
-               FROM operations WHERE operation_id=? AND actor=?"#,
-        )
-        .bind(operation_id)
-        .bind(actor)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("operation not found".into()))?;
-        stored.into_view()
+        let stored = self
+            .store
+            .get(operation_id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| AppError::NotFound("operation not found".into()))?;
+        ensure_actor(&stored, actor)?;
+        Ok(operation_view(stored))
     }
 
-    /// Requeues only operations whose desired state can be compared safely
-    /// after an ambiguous delivery. The same durable operation and request are
-    /// retained; a new idempotency identity is never invented.
-    pub async fn retry_for_actor(
-        &self,
-        actor: &str,
-        operation_id: &str,
-    ) -> AppResult<OperationView> {
-        validate_actor(actor)?;
-        let now = db::now_micros()?;
-        let updated = sqlx::query_as::<_, StoredOperationView>(
-            r#"UPDATE operations
-               SET state='pending',updated_at_micros=?,started_at_micros=NULL,
-                   completed_at_micros=NULL,error_code=NULL,dead_letter_at_micros=NULL
-               WHERE operation_id=? AND actor=?
-                 AND state IN ('unknown','failed')
-                 AND attempt < max_attempts
-                 AND action IN (
-                    'sunshine.app.save','sunshine.client.unpair',
-                    'sunshine.client.unpair_all','sunshine.config.save'
-                 )
-               RETURNING operation_id,state,attempt,max_attempts,created_at_micros,
-                         updated_at_micros,started_at_micros,completed_at_micros,resolution"#,
-        )
-        .bind(now)
-        .bind(operation_id)
-        .bind(actor)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::Conflict("operation is not safely retryable".into()))?;
-        self.notify.notify_one();
-        updated.into_view()
-    }
-
-    /// Records an operator's evidence-based decision without replaying the
-    /// remote mutation. Unknown and exhausted operations remain immutable
-    /// evidence and only gain explicit resolution metadata.
     pub async fn resolve_for_actor(
         &self,
         actor: &str,
         operation_id: &str,
-        resolution: &str,
+        resolution: sarmg_operations::Resolution,
     ) -> AppResult<OperationView> {
         validate_actor(actor)?;
-        if !matches!(resolution, "confirmed_succeeded" | "confirmed_failed") {
-            return Err(AppError::BadRequest("invalid operation resolution".into()));
-        }
+        let current = self
+            .store
+            .get(operation_id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| AppError::NotFound("operation not found".into()))?;
+        ensure_actor(&current, actor)?;
         let now = db::now_micros()?;
-        let mut transaction = self.pool.begin().await?;
-        let operation = sqlx::query_as::<_, RecoveryOperation>(
-            "SELECT operation_id,actor,host_id,action,attempt FROM operations WHERE operation_id=? AND actor=? AND state IN ('unknown','dead_letter')",
-        )
-        .bind(operation_id)
-        .bind(actor)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| AppError::Conflict("operation does not require resolution".into()))?;
-        sqlx::query(
-            "UPDATE operations SET state='resolved',updated_at_micros=?,resolved_at_micros=?,resolved_by=?,resolution=? WHERE operation_id=?",
-        )
-        .bind(now)
-        .bind(now)
-        .bind(actor)
-        .bind(resolution)
-        .bind(operation_id)
-        .execute(&mut *transaction)
-        .await?;
-        insert_outbox(
-            &mut transaction,
-            &format!("out_{}", Uuid::new_v4()),
-            operation_id,
-            "resolved",
-            &format!("{}.resolved", operation.action),
-            &operation.host_id,
-            actor,
-            &format!("operation_id={operation_id} state=resolved resolution={resolution}"),
-            now,
-        )
-        .await?;
-        let view = sqlx::query_as::<_, StoredOperationView>(
-            r#"SELECT operation_id,state,attempt,max_attempts,created_at_micros,
-                      updated_at_micros,started_at_micros,completed_at_micros,resolution
-               FROM operations WHERE operation_id=?"#,
-        )
-        .bind(operation_id)
-        .fetch_one(&mut *transaction)
-        .await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let updated =
+            SqliteOperationStore::resolve_in(&mut transaction, operation_id, resolution, now)
+                .await
+                .map_err(|error| match error {
+                    sarmg_operations::Error::InvalidTransition { .. } => {
+                        AppError::Conflict("operation does not require resolution".into())
+                    }
+                    other => AppError::Internal(other.into()),
+                })?;
+        sqlx::query("INSERT INTO audit_logs(action,target,detail,actor,created_at_micros) VALUES('operation.resolve',?,?,?,?)")
+            .bind(&current.operation.target_key)
+            .bind(format!("operation_id={} resolution={}", operation_id, resolution.as_str()))
+            .bind(actor).bind(now).execute(&mut *transaction).await?;
         transaction.commit().await?;
         self.notify.notify_one();
-        view.into_view()
+        Ok(operation_view(updated))
     }
 
-    /// Converts interrupted in-flight work to `unknown` before new requests
-    /// are accepted. Pending operations are intentionally left recoverable.
     pub async fn recover_startup(&self) -> AppResult<u64> {
-        let running = sqlx::query_as::<_, RecoveryOperation>(
-            "SELECT operation_id,actor,host_id,action,attempt FROM operations WHERE state='running'",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        if running.is_empty() {
-            self.notify.notify_one();
-            return Ok(0);
-        }
-
-        let now = db::now_micros()?;
-        let mut transaction = self.pool.begin().await?;
-        for operation in &running {
-            let updated = sqlx::query(
-                r#"UPDATE operations
-                   SET state='unknown',updated_at_micros=?,completed_at_micros=?,
-                       error_code='worker_interrupted'
-                   WHERE operation_id=? AND state='running'"#,
-            )
-            .bind(now)
-            .bind(now)
-            .bind(&operation.operation_id)
-            .execute(&mut *transaction)
-            .await?;
-            if updated.rows_affected() == 1 {
-                insert_completion_outbox(&mut transaction, operation, OperationState::Unknown, now)
-                    .await?;
-            }
-        }
-        transaction.commit().await?;
-        self.notify.notify_one();
-        Ok(running.len() as u64)
+        self.store
+            .recover_running(NAMESPACE, "worker_interrupted", db::now_micros()?)
+            .await
+            .map_err(internal)
     }
 
-    /// Publishes a bounded outbox batch. Audit insertion and marking delivery
-    /// happen in one transaction; the unique outbox id makes re-delivery safe.
     pub async fn deliver_outbox(&self) -> AppResult<u64> {
-        let mut transaction = self.pool.begin().await?;
-        let rows = sqlx::query_as::<_, StoredOutbox>(
-            r#"SELECT outbox_id,action,target,detail,actor,created_at_micros
-               FROM audit_outbox
-               WHERE delivered_at_micros IS NULL
-               ORDER BY created_at_micros,
-                        CASE event_kind WHEN 'requested' THEN 0 ELSE 1 END,
-                        outbox_id
-               LIMIT ?"#,
-        )
-        .bind(OUTBOX_BATCH)
-        .fetch_all(&mut *transaction)
-        .await?;
+        let events = self
+            .store
+            .pending_audit_events(OUTBOX_BATCH)
+            .await
+            .map_err(internal)?;
         let delivered_at = db::now_micros()?;
-        for row in &rows {
+        let mut delivered = 0_u64;
+        for event in events {
+            let Some(operation) = self
+                .store
+                .get(&event.operation_id)
+                .await
+                .map_err(internal)?
+            else {
+                continue;
+            };
+            let payload = decode_payload(&operation)?;
+            let detail = format!(
+                "operation_id={} from={} state={}",
+                event.operation_id, event.from_state, event.to_state
+            );
+            let mut transaction = self.pool.begin().await?;
             sqlx::query(
-                r#"INSERT INTO audit_logs(
-                       action,target,detail,actor,created_at_micros,outbox_id
-                   ) VALUES(?,?,?,?,?,?)
-                   ON CONFLICT(outbox_id) DO NOTHING"#,
+                "INSERT INTO audit_logs(action,target,detail,actor,created_at_micros,outbox_id) \
+                 VALUES(?,?,?,?,?,?) ON CONFLICT(outbox_id) DO NOTHING",
             )
-            .bind(&row.action)
-            .bind(&row.target)
-            .bind(&row.detail)
-            .bind(&row.actor)
-            .bind(row.created_at_micros)
-            .bind(&row.outbox_id)
+            .bind(format!("{}.{}", operation.action, event.to_state))
+            .bind(&operation.operation.target_key)
+            .bind(detail)
+            .bind(payload.actor)
+            .bind(event.created_at_micros)
+            .bind(&event.event_id)
             .execute(&mut *transaction)
             .await?;
-            sqlx::query(
-                r#"UPDATE audit_outbox
-                   SET delivered_at_micros=?,delivery_attempt=delivery_attempt+1
-                   WHERE outbox_id=? AND delivered_at_micros IS NULL"#,
+            if SqliteOperationStore::mark_audit_delivered_in(
+                &mut transaction,
+                &event.event_id,
+                delivered_at,
             )
-            .bind(delivered_at)
-            .bind(&row.outbox_id)
-            .execute(&mut *transaction)
-            .await?;
+            .await
+            .map_err(internal)?
+            {
+                delivered += 1;
+            }
+            transaction.commit().await?;
         }
-        transaction.commit().await?;
-        Ok(rows.len() as u64)
+        Ok(delivered)
     }
 
-    /// Runs independently of any HTTP request. Dropping this future aborts its
-    /// child tasks; claimed rows remain `running` and become `unknown` on the
-    /// next startup rather than being retried blindly.
-    pub async fn run(self) {
-        let mut tasks = JoinSet::new();
-        let mut active_hosts = HashSet::new();
+    pub async fn run_until(self, mut shutdown: watch::Receiver<bool>) -> Result<(), String> {
+        let mut tasks = tokio::task::JoinSet::new();
         loop {
+            if *shutdown.borrow() || shutdown.has_changed().is_err() {
+                break;
+            }
             while let Some(result) = tasks.try_join_next() {
-                finish_task(result, &mut active_hosts);
+                result.map_err(|_| "operation worker task failed".to_owned())?;
             }
             if let Err(error) = self.deliver_outbox().await {
                 tracing::warn!(%error, "operation audit outbox delivery failed");
             }
-            if tasks.len() < MAX_ACTIVE_HOSTS {
-                match self.pending().await {
-                    Ok(pending) => {
-                        for operation in pending {
-                            if tasks.len() >= MAX_ACTIVE_HOSTS {
-                                break;
-                            }
-                            if active_hosts.insert(operation.host_id.clone()) {
-                                let manager = self.clone();
-                                tasks.spawn(async move {
-                                    let host_id = operation.host_id;
-                                    manager.execute_one(&operation.operation_id, &host_id).await;
-                                    host_id
-                                });
-                            }
-                        }
+            while tasks.len() < MAX_ACTIVE_HOSTS {
+                if *shutdown.borrow() || shutdown.has_changed().is_err() {
+                    break;
+                }
+                let now = match db::now_micros() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "operation clock unavailable");
+                        break;
                     }
-                    Err(error) => tracing::warn!(%error, "operation dispatch query failed"),
+                };
+                match self
+                    .store
+                    .claim_next(
+                        NAMESPACE,
+                        &Uuid::new_v4().to_string(),
+                        now,
+                        now.saturating_add(OPERATION_LEASE_MICROS),
+                    )
+                    .await
+                {
+                    Ok(Some(operation)) => {
+                        let manager = self.clone();
+                        tasks.spawn(async move { manager.execute_claimed(operation).await });
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "operation claim failed");
+                        break;
+                    }
                 }
             }
-
             tokio::select! {
+                _ = sarmg_server_runtime::wait_for_shutdown(&mut shutdown) => break,
                 result = tasks.join_next(), if !tasks.is_empty() => {
                     if let Some(result) = result {
-                        finish_task(result, &mut active_hosts);
+                        result.map_err(|_| "operation worker task failed".to_owned())?;
                     }
                 }
                 _ = self.notify.notified() => {}
                 _ = tokio::time::sleep(IDLE_POLL) => {}
             }
         }
+        let drain = async {
+            while let Some(result) = tasks.join_next().await {
+                result.map_err(|_| "operation worker task failed".to_owned())?;
+            }
+            Ok::<(), String>(())
+        };
+        if let Ok(result) = tokio::time::timeout(Duration::from_secs(25), drain).await {
+            result?;
+        }
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        // Aborted claims remain durable Running until exclusive startup recovery
+        // marks them Unknown; they are never requeued by shutdown.
+        self.deliver_outbox()
+            .await
+            .map_err(|_| "operation audit delivery failed".to_owned())?;
+        Ok(())
     }
 
-    async fn pending(&self) -> AppResult<Vec<PendingOperation>> {
-        Ok(sqlx::query_as::<_, PendingOperation>(
-            r#"SELECT current.operation_id,current.host_id
-               FROM operations current
-               WHERE current.state='pending'
-                 AND NOT EXISTS (
-                     SELECT 1 FROM operations earlier
-                     WHERE earlier.state='pending'
-                       AND earlier.host_id=current.host_id
-                       AND (
-                           earlier.created_at_micros<current.created_at_micros
-                           OR (
-                               earlier.created_at_micros=current.created_at_micros
-                               AND earlier.operation_id<current.operation_id
-                           )
-                       )
-                 )
-               ORDER BY current.created_at_micros,current.operation_id LIMIT ?"#,
-        )
-        .bind(DISPATCH_BATCH)
-        .fetch_all(&self.pool)
-        .await?)
-    }
-
-    async fn execute_one(&self, operation_id: &str, host_id: &str) {
-        let _guard = self.locks.lock(host_id).await;
-        let claimed = match self.claim(operation_id).await {
-            Ok(Some(operation)) => operation,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(operation_id, %error, "operation claim failed");
-                return;
+    async fn execute_claimed(&self, operation: StoredOperation) {
+        let outcome = tokio::time::timeout(EXECUTION_TIMEOUT, self.execute_request(&operation))
+            .await
+            .unwrap_or_else(|_| OperationOutcome::Indeterminate {
+                code: "execution_deadline_exceeded".into(),
+            });
+        let completion = match outcome {
+            OperationOutcome::Succeeded(value) => {
+                let result = serde_json::to_vec(&value).ok();
+                self.finish(&operation, Transition::Succeed, result.as_deref())
+                    .await
+            }
+            OperationOutcome::DefinitiveFailure { code, retryable } => {
+                let now = db::now_micros().unwrap_or_default();
+                self.finish(
+                    &operation,
+                    Transition::Fail {
+                        code,
+                        retryable,
+                        retry_not_before_micros: now.saturating_add(1_000_000),
+                    },
+                    None,
+                )
+                .await
+            }
+            OperationOutcome::Indeterminate { code } => {
+                self.finish(&operation, Transition::MarkIndeterminate { code }, None)
+                    .await
             }
         };
-
-        let outcome = self.execute_claimed(&claimed).await;
-        if let Err(error) = self.finalize(&claimed, outcome).await {
-            tracing::error!(operation_id, %error, "operation completion persistence failed");
-            self.persist_unknown_without_reexecuting(&claimed).await;
+        if let Err(error) = completion {
+            tracing::error!(operation_id=%operation.operation.operation_id, %error, "operation completion persistence failed");
+            self.persist_unknown_without_reexecuting(&operation).await;
         }
         self.notify.notify_one();
     }
 
-    async fn persist_unknown_without_reexecuting(&self, operation: &ClaimedOperation) {
-        let mut retry_delay = Duration::from_millis(100);
+    async fn finish(
+        &self,
+        operation: &StoredOperation,
+        transition: Transition,
+        result: Option<&[u8]>,
+    ) -> AppResult<()> {
+        self.store
+            .apply_transition_owned(
+                &operation.operation.operation_id,
+                operation
+                    .operation
+                    .lease_owner
+                    .as_deref()
+                    .ok_or_else(|| internal(anyhow::anyhow!("operation claim has no owner")))?,
+                transition,
+                result,
+                db::now_micros()?,
+            )
+            .await
+            .map(|_| ())
+            .map_err(internal)
+    }
+
+    async fn persist_unknown_without_reexecuting(&self, operation: &StoredOperation) {
+        let mut delay = Duration::from_millis(100);
         loop {
-            match self.mark_unknown_after_persistence_failure(operation).await {
-                Ok(()) => return,
+            let now = db::now_micros().unwrap_or_default();
+            match self
+                .store
+                .abandon_claim(
+                    &operation.operation,
+                    "completion_persistence_uncertain",
+                    now,
+                )
+                .await
+            {
+                Ok(_)
+                | Err(
+                    sarmg_operations::Error::ConcurrentModification
+                    | sarmg_operations::Error::NotFound,
+                ) => return,
                 Err(error) => {
-                    tracing::error!(
-                        operation_id = %operation.operation_id,
-                        %error,
-                        "operation unknown state persistence will retry without remote execution"
-                    );
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(5));
+                    tracing::error!(operation_id=%operation.operation.operation_id, %error, "persisting unknown state failed");
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2).min(Duration::from_secs(5));
                 }
             }
         }
     }
 
-    async fn claim(&self, operation_id: &str) -> AppResult<Option<ClaimedOperation>> {
-        let now = db::now_micros()?;
-        Ok(sqlx::query_as::<_, ClaimedOperation>(
-            r#"UPDATE operations
-               SET state='running',attempt=attempt+1,started_at_micros=?,updated_at_micros=?
-               WHERE operation_id=? AND state='pending' AND attempt < max_attempts
-               RETURNING operation_id,actor,host_id,action,request_ciphertext,attempt,max_attempts"#,
-        )
-        .bind(now)
-        .bind(now)
-        .bind(operation_id)
-        .fetch_optional(&self.pool)
-        .await?)
-    }
-
-    async fn execute_claimed(&self, operation: &ClaimedOperation) -> ExecutionOutcome {
+    async fn execute_request(&self, operation: &StoredOperation) -> OperationOutcome<Value> {
+        let payload = match decode_payload(operation) {
+            Ok(value) => value,
+            Err(_) => {
+                return OperationOutcome::DefinitiveFailure {
+                    code: "request_corrupt".into(),
+                    retryable: false,
+                };
+            }
+        };
         let request = self
             .secrets
             .decrypt_operation_request(
-                &operation.operation_id,
+                &operation.operation.operation_id,
                 &operation.action,
-                &operation.request_ciphertext,
+                &payload.request_ciphertext,
             )
             .ok()
-            .and_then(|plaintext| serde_json::from_str::<RemoteOperationRequest>(&plaintext).ok());
+            .and_then(|value| serde_json::from_str::<RemoteOperationRequest>(&value).ok());
         let Some(mut request) = request else {
-            return ExecutionOutcome::Failed("request_corrupt");
+            return OperationOutcome::DefinitiveFailure {
+                code: "request_corrupt".into(),
+                retryable: false,
+            };
         };
         if request.action() != operation.action {
-            return ExecutionOutcome::Failed("request_corrupt");
+            return OperationOutcome::DefinitiveFailure {
+                code: "request_corrupt".into(),
+                retryable: false,
+            };
         }
-        let host = match db::get_host(&self.pool, &self.secrets, &operation.host_id).await {
-            Ok(host) => host,
-            Err(AppError::NotFound(_)) => return ExecutionOutcome::Failed("host_not_found"),
-            Err(_) => return ExecutionOutcome::Failed("local_state_unavailable"),
-        };
+        let host =
+            match db::get_host(&self.pool, &self.secrets, &operation.operation.target_key).await {
+                Ok(host) => host,
+                Err(AppError::NotFound(_)) => {
+                    return OperationOutcome::DefinitiveFailure {
+                        code: "host_not_found".into(),
+                        retryable: false,
+                    };
+                }
+                Err(_) => {
+                    return OperationOutcome::DefinitiveFailure {
+                        code: "local_state_unavailable".into(),
+                        retryable: true,
+                    };
+                }
+            };
         if let RemoteOperationRequest::CoverUpload { url, .. } = &mut request {
             let cover = match self.cover_url_policy.download(url).await {
-                Ok(cover) => cover,
-                Err(_) => return ExecutionOutcome::Failed("cover_download_rejected"),
+                Ok(value) => value,
+                Err(_) => {
+                    return OperationOutcome::DefinitiveFailure {
+                        code: "cover_download_rejected".into(),
+                        retryable: false,
+                    };
+                }
             };
-            let delivery = match self
+            match self
                 .cover_proxy
-                .publish(&host, &operation.operation_id, cover)
+                .publish(&host, &operation.operation.operation_id, cover)
                 .await
             {
-                Ok(delivery) => delivery,
-                Err(_) => return ExecutionOutcome::Failed("cover_delivery_unavailable"),
-            };
-            *url = delivery;
+                Ok(delivery) => *url = delivery,
+                Err(_) => {
+                    return OperationOutcome::DefinitiveFailure {
+                        code: "cover_delivery_unavailable".into(),
+                        retryable: true,
+                    };
+                }
+            }
         }
-        self.executor.execute(host, request).await
+        self.executor
+            .execute(
+                OperationContext {
+                    operation_id: operation.operation.operation_id.clone(),
+                    namespace: NAMESPACE.into(),
+                    target_key: operation.operation.target_key.clone(),
+                    attempt: operation.operation.attempt,
+                },
+                (host, request),
+            )
+            .await
     }
+}
 
-    async fn finalize(
+struct SunshineExecutor {
+    transport: Arc<dyn MutationTransport>,
+}
+
+#[async_trait]
+impl OperationExecutor for SunshineExecutor {
+    type Request = (Host, RemoteOperationRequest);
+    type Result = Value;
+
+    async fn execute(
         &self,
-        operation: &ClaimedOperation,
-        outcome: ExecutionOutcome,
-    ) -> AppResult<()> {
-        let (mut state, error_code) = outcome.parts();
-        if state != OperationState::Succeeded && operation.attempt >= operation.max_attempts {
-            state = OperationState::DeadLetter;
+        _context: OperationContext,
+        (host, request): Self::Request,
+    ) -> OperationOutcome<Self::Result> {
+        match self.transport.send(host, request).await {
+            Ok(value) => OperationOutcome::Succeeded(value),
+            Err(AppError::Forbidden(_)) => OperationOutcome::DefinitiveFailure {
+                code: "upstream_rejected".into(),
+                retryable: false,
+            },
+            Err(_) => OperationOutcome::Indeterminate {
+                code: "upstream_result_unknown".into(),
+            },
         }
-        let now = db::now_micros()?;
-        let mut transaction = self.pool.begin().await?;
-        let updated = sqlx::query(
-            r#"UPDATE operations
-               SET state=?,updated_at_micros=?,completed_at_micros=?,error_code=?,
-                   dead_letter_at_micros=CASE WHEN ?='dead_letter' THEN ? ELSE NULL END
-               WHERE operation_id=? AND state='running'"#,
-        )
-        .bind(state.as_str())
-        .bind(now)
-        .bind(now)
-        .bind(error_code)
-        .bind(state.as_str())
-        .bind(now)
-        .bind(&operation.operation_id)
-        .execute(&mut *transaction)
-        .await?;
-        if updated.rows_affected() != 1 {
-            return Err(AppError::Conflict("operation is no longer running".into()));
-        }
-        insert_completion_outbox(&mut transaction, operation, state, now).await?;
-        transaction.commit().await?;
-        Ok(())
     }
+}
 
-    async fn mark_unknown_after_persistence_failure(
-        &self,
-        operation: &ClaimedOperation,
-    ) -> AppResult<()> {
-        let now = db::now_micros()?;
-        let mut transaction = self.pool.begin().await?;
-        let updated = sqlx::query(
-            r#"UPDATE operations
-               SET state='unknown',updated_at_micros=?,completed_at_micros=?,
-                   error_code='completion_persistence_uncertain'
-               WHERE operation_id=? AND state='running'"#,
-        )
-        .bind(now)
-        .bind(now)
-        .bind(&operation.operation_id)
-        .execute(&mut *transaction)
-        .await?;
-        if updated.rows_affected() == 1 {
-            insert_completion_outbox(&mut transaction, operation, OperationState::Unknown, now)
-                .await?;
+#[async_trait]
+trait MutationTransport: Send + Sync {
+    async fn send(&self, host: Host, request: RemoteOperationRequest) -> AppResult<Value>;
+}
+
+struct UpstreamMutationTransport {
+    upstream: UpstreamClient,
+}
+
+#[async_trait]
+impl MutationTransport for UpstreamMutationTransport {
+    async fn send(&self, host: Host, request: RemoteOperationRequest) -> AppResult<Value> {
+        match request {
+            RemoteOperationRequest::AppsSave { body } => {
+                self.upstream.apps_save(&host, &body).await
+            }
+            RemoteOperationRequest::AppsClose => self.upstream.apps_close(&host).await,
+            RemoteOperationRequest::AppsDelete { index } => {
+                self.upstream.apps_delete(&host, index).await
+            }
+            RemoteOperationRequest::ClientsUnpair { uuid } => {
+                self.upstream.clients_unpair(&host, &uuid).await
+            }
+            RemoteOperationRequest::ClientsUnpairAll => {
+                self.upstream.clients_unpair_all(&host).await
+            }
+            RemoteOperationRequest::ClientsUpdate { uuid, enabled } => {
+                self.upstream.clients_update(&host, &uuid, enabled).await
+            }
+            RemoteOperationRequest::ConfigSave { body } => {
+                self.upstream.config_save(&host, &body).await
+            }
+            RemoteOperationRequest::Pin { pin, name } => {
+                self.upstream.pin(&host, &pin, &name).await
+            }
+            RemoteOperationRequest::Restart => self.upstream.restart(&host).await,
+            RemoteOperationRequest::ResetDisplay => self.upstream.reset_display(&host).await,
+            RemoteOperationRequest::CoverUpload { key, url } => {
+                self.upstream.cover_upload(&host, &key, &url).await
+            }
         }
-        transaction.commit().await?;
+    }
+}
+
+fn scoped_idempotency_digest(actor: &str, host_id: &str, action: &str, key: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for value in [actor.as_bytes(), host_id.as_bytes(), action.as_bytes(), key] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+    hasher.finalize().into()
+}
+
+fn decode_payload(operation: &StoredOperation) -> AppResult<DurablePayload> {
+    serde_json::from_slice(&operation.request_payload).map_err(internal)
+}
+
+fn ensure_actor(operation: &StoredOperation, actor: &str) -> AppResult<()> {
+    if decode_payload(operation)?.actor == actor {
         Ok(())
+    } else {
+        Err(AppError::NotFound("operation not found".into()))
+    }
+}
+
+fn operation_view(value: StoredOperation) -> OperationView {
+    let state = value.operation.state;
+    let started = (value.operation.attempt > 0).then_some(value.updated_at_micros);
+    let completed = matches!(
+        state,
+        OperationState::Succeeded
+            | OperationState::Failed
+            | OperationState::Unknown
+            | OperationState::DeadLetter
+            | OperationState::Resolved
+    )
+    .then_some(value.updated_at_micros);
+    OperationView {
+        operation_id: value.operation.operation_id,
+        state,
+        attempt: i64::from(value.operation.attempt),
+        max_attempts: i64::from(value.operation.max_attempts),
+        created_at_micros: value.created_at_micros,
+        updated_at_micros: value.updated_at_micros,
+        started_at_micros: started,
+        completed_at_micros: completed,
+        resolution: value.resolution_code,
     }
 }
 
@@ -747,351 +746,8 @@ fn validate_actor(actor: &str) -> AppResult<()> {
     Ok(())
 }
 
-type ExecutionFuture<'a> = Pin<Box<dyn Future<Output = ExecutionOutcome> + Send + 'a>>;
-
-trait RemoteOperationExecutor: Send + Sync {
-    fn execute<'a>(&'a self, host: Host, request: RemoteOperationRequest) -> ExecutionFuture<'a>;
-}
-
-struct SunshineExecutor {
-    transport: Arc<dyn MutationTransport>,
-}
-
-type TransportFuture<'a> = Pin<Box<dyn Future<Output = AppResult<Value>> + Send + 'a>>;
-
-trait MutationTransport: Send + Sync {
-    fn send<'a>(&'a self, host: Host, request: RemoteOperationRequest) -> TransportFuture<'a>;
-}
-
-struct UpstreamMutationTransport {
-    upstream: UpstreamClient,
-}
-
-impl MutationTransport for UpstreamMutationTransport {
-    fn send<'a>(&'a self, host: Host, request: RemoteOperationRequest) -> TransportFuture<'a> {
-        Box::pin(async move {
-            match request {
-                RemoteOperationRequest::AppsSave { body } => {
-                    self.upstream.apps_save(&host, &body).await
-                }
-                RemoteOperationRequest::AppsClose => self.upstream.apps_close(&host).await,
-                RemoteOperationRequest::AppsDelete { index } => {
-                    self.upstream.apps_delete(&host, index).await
-                }
-                RemoteOperationRequest::ClientsUnpair { uuid } => {
-                    self.upstream.clients_unpair(&host, &uuid).await
-                }
-                RemoteOperationRequest::ClientsUnpairAll => {
-                    self.upstream.clients_unpair_all(&host).await
-                }
-                RemoteOperationRequest::ClientsUpdate { uuid, enabled } => {
-                    self.upstream.clients_update(&host, &uuid, enabled).await
-                }
-                RemoteOperationRequest::ConfigSave { body } => {
-                    self.upstream.config_save(&host, &body).await
-                }
-                RemoteOperationRequest::Pin { pin, name } => {
-                    self.upstream.pin(&host, &pin, &name).await
-                }
-                RemoteOperationRequest::Restart => self.upstream.restart(&host).await,
-                RemoteOperationRequest::ResetDisplay => self.upstream.reset_display(&host).await,
-                RemoteOperationRequest::CoverUpload { key, url } => {
-                    self.upstream.cover_upload(&host, &key, &url).await
-                }
-            }
-        })
-    }
-}
-
-impl RemoteOperationExecutor for SunshineExecutor {
-    fn execute<'a>(&'a self, host: Host, request: RemoteOperationRequest) -> ExecutionFuture<'a> {
-        Box::pin(async move {
-            let result = self.transport.send(host, request).await;
-            match result {
-                Ok(_) => ExecutionOutcome::Succeeded,
-                Err(AppError::Forbidden(_)) => ExecutionOutcome::Failed("upstream_rejected"),
-                Err(_) => ExecutionOutcome::Unknown("upstream_result_unknown"),
-            }
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ExecutionOutcome {
-    Succeeded,
-    Failed(&'static str),
-    Unknown(&'static str),
-}
-
-impl ExecutionOutcome {
-    fn parts(self) -> (OperationState, Option<&'static str>) {
-        match self {
-            Self::Succeeded => (OperationState::Succeeded, None),
-            Self::Failed(code) => (OperationState::Failed, Some(code)),
-            Self::Unknown(code) => (OperationState::Unknown, Some(code)),
-        }
-    }
-}
-
-#[derive(FromRow)]
-struct ExistingOperation {
-    operation_id: String,
-    request_fingerprint: Vec<u8>,
-    state: String,
-    attempt: i64,
-    max_attempts: i64,
-    created_at_micros: i64,
-    updated_at_micros: i64,
-    started_at_micros: Option<i64>,
-    completed_at_micros: Option<i64>,
-    resolution: Option<String>,
-}
-
-const EXISTING_OPERATION_SQL: &str = r#"SELECT
-    operation_id,request_fingerprint,state,attempt,max_attempts,created_at_micros,
-    updated_at_micros,started_at_micros,completed_at_micros,resolution
-FROM operations
-WHERE actor=? AND host_id=? AND action=? AND idempotency_key_hash=?"#;
-
-async fn find_existing(
-    pool: &SqlitePool,
-    actor: &str,
-    host_id: &str,
-    action: &str,
-    key_hash: &[u8],
-) -> AppResult<Option<ExistingOperation>> {
-    Ok(
-        sqlx::query_as::<_, ExistingOperation>(EXISTING_OPERATION_SQL)
-            .bind(actor)
-            .bind(host_id)
-            .bind(action)
-            .bind(key_hash)
-            .fetch_optional(pool)
-            .await?,
-    )
-}
-
-async fn find_existing_in_transaction(
-    transaction: &mut Transaction<'_, Sqlite>,
-    actor: &str,
-    host_id: &str,
-    action: &str,
-    key_hash: &[u8],
-) -> AppResult<ExistingOperation> {
-    Ok(
-        sqlx::query_as::<_, ExistingOperation>(EXISTING_OPERATION_SQL)
-            .bind(actor)
-            .bind(host_id)
-            .bind(action)
-            .bind(key_hash)
-            .fetch_one(&mut **transaction)
-            .await?,
-    )
-}
-
-fn compare_existing(
-    existing: ExistingOperation,
-    request_fingerprint: &[u8; 32],
-) -> AppResult<OperationView> {
-    if !constant_time_equal_32(&existing.request_fingerprint, request_fingerprint) {
-        return Err(AppError::Conflict(
-            "Idempotency-Key was already used with a different request".into(),
-        ));
-    }
-    existing.into_view()
-}
-
-impl ExistingOperation {
-    fn into_view(self) -> AppResult<OperationView> {
-        StoredOperationView {
-            operation_id: self.operation_id,
-            state: self.state,
-            attempt: self.attempt,
-            max_attempts: self.max_attempts,
-            created_at_micros: self.created_at_micros,
-            updated_at_micros: self.updated_at_micros,
-            started_at_micros: self.started_at_micros,
-            completed_at_micros: self.completed_at_micros,
-            resolution: self.resolution,
-        }
-        .into_view()
-    }
-}
-
-#[derive(FromRow)]
-struct StoredOperationView {
-    operation_id: String,
-    state: String,
-    attempt: i64,
-    max_attempts: i64,
-    created_at_micros: i64,
-    updated_at_micros: i64,
-    started_at_micros: Option<i64>,
-    completed_at_micros: Option<i64>,
-    resolution: Option<String>,
-}
-
-impl StoredOperationView {
-    fn into_view(self) -> AppResult<OperationView> {
-        Ok(OperationView {
-            operation_id: self.operation_id,
-            state: OperationState::parse(&self.state)?,
-            attempt: self.attempt,
-            max_attempts: self.max_attempts,
-            created_at_micros: self.created_at_micros,
-            updated_at_micros: self.updated_at_micros,
-            started_at_micros: self.started_at_micros,
-            completed_at_micros: self.completed_at_micros,
-            resolution: self.resolution,
-        })
-    }
-}
-
-#[derive(FromRow)]
-struct PendingOperation {
-    operation_id: String,
-    host_id: String,
-}
-
-#[derive(FromRow)]
-struct ClaimedOperation {
-    operation_id: String,
-    actor: String,
-    host_id: String,
-    action: String,
-    request_ciphertext: String,
-    attempt: i64,
-    max_attempts: i64,
-}
-
-#[derive(FromRow)]
-struct RecoveryOperation {
-    operation_id: String,
-    actor: String,
-    host_id: String,
-    action: String,
-    attempt: i64,
-}
-
-#[derive(FromRow)]
-struct StoredOutbox {
-    outbox_id: String,
-    action: String,
-    target: String,
-    detail: String,
-    actor: String,
-    created_at_micros: i64,
-}
-
-trait CompletionOperation {
-    fn operation_id(&self) -> &str;
-    fn actor(&self) -> &str;
-    fn host_id(&self) -> &str;
-    fn action(&self) -> &str;
-    fn attempt(&self) -> i64;
-}
-
-impl CompletionOperation for ClaimedOperation {
-    fn operation_id(&self) -> &str {
-        &self.operation_id
-    }
-    fn actor(&self) -> &str {
-        &self.actor
-    }
-    fn host_id(&self) -> &str {
-        &self.host_id
-    }
-    fn action(&self) -> &str {
-        &self.action
-    }
-    fn attempt(&self) -> i64 {
-        self.attempt
-    }
-}
-
-impl CompletionOperation for RecoveryOperation {
-    fn operation_id(&self) -> &str {
-        &self.operation_id
-    }
-    fn actor(&self) -> &str {
-        &self.actor
-    }
-    fn host_id(&self) -> &str {
-        &self.host_id
-    }
-    fn action(&self) -> &str {
-        &self.action
-    }
-    fn attempt(&self) -> i64 {
-        self.attempt
-    }
-}
-
-async fn insert_completion_outbox(
-    transaction: &mut Transaction<'_, Sqlite>,
-    operation: &impl CompletionOperation,
-    state: OperationState,
-    now: i64,
-) -> AppResult<()> {
-    insert_outbox(
-        transaction,
-        &format!("out_{}", Uuid::new_v4()),
-        operation.operation_id(),
-        "completed",
-        &format!("{}.{}", operation.action(), state.as_str()),
-        operation.host_id(),
-        operation.actor(),
-        &format!(
-            "operation_id={} state={} attempt={}",
-            operation.operation_id(),
-            state.as_str(),
-            operation.attempt()
-        ),
-        now,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn insert_outbox(
-    transaction: &mut Transaction<'_, Sqlite>,
-    outbox_id: &str,
-    operation_id: &str,
-    event_kind: &str,
-    action: &str,
-    target: &str,
-    actor: &str,
-    detail: &str,
-    now: i64,
-) -> AppResult<()> {
-    sqlx::query(
-        r#"INSERT INTO audit_outbox(
-               outbox_id,operation_id,event_kind,action,target,actor,detail,created_at_micros
-           ) VALUES(?,?,?,?,?,?,?,?)"#,
-    )
-    .bind(outbox_id)
-    .bind(operation_id)
-    .bind(event_kind)
-    .bind(action)
-    .bind(target)
-    .bind(actor)
-    .bind(detail)
-    .bind(now)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
-fn finish_task(result: Result<String, JoinError>, active_hosts: &mut HashSet<String>) {
-    match result {
-        Ok(host_id) => {
-            active_hosts.remove(&host_id);
-        }
-        Err(error) => {
-            tracing::error!(%error, "operation worker task failed");
-            active_hosts.clear();
-        }
-    }
+fn internal(error: impl Into<anyhow::Error>) -> AppError {
+    AppError::Internal(error.into())
 }
 
 fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1101,847 +757,215 @@ fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    use sha2::{Digest as _, Sha256};
-    use tempfile::TempDir;
-
     use super::*;
-    use crate::model::HostSaveRequest;
 
-    const ACTOR: &str = "actor-a";
-
-    struct FixedExecutor(ExecutionOutcome);
-
-    impl RemoteOperationExecutor for FixedExecutor {
-        fn execute<'a>(
-            &'a self,
-            _host: Host,
-            _request: RemoteOperationRequest,
-        ) -> ExecutionFuture<'a> {
-            let outcome = self.0;
-            Box::pin(async move { outcome })
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    enum FakeTransportResult {
-        Success,
-        Rejected,
-        Uncertain,
-    }
-
-    struct FakeMutationTransport(FakeTransportResult);
-
-    impl MutationTransport for FakeMutationTransport {
-        fn send<'a>(
-            &'a self,
-            _host: Host,
-            _request: RemoteOperationRequest,
-        ) -> TransportFuture<'a> {
-            let result = self.0;
-            Box::pin(async move {
-                match result {
-                    FakeTransportResult::Success => Ok(serde_json::json!({ "status": true })),
-                    FakeTransportResult::Rejected => {
-                        Err(AppError::Forbidden("remote body must stay private".into()))
-                    }
-                    FakeTransportResult::Uncertain => Err(AppError::Upstream(
-                        "transport disconnected after request transmission".into(),
-                    )),
-                }
-            })
-        }
-    }
-
-    #[derive(Default)]
-    struct ConcurrencyExecutor {
-        active: Mutex<HashMap<String, usize>>,
-        same_host_overlap: AtomicBool,
-        global_active: AtomicUsize,
-        max_global_active: AtomicUsize,
-    }
-
-    impl RemoteOperationExecutor for ConcurrencyExecutor {
-        fn execute<'a>(
-            &'a self,
-            host: Host,
-            _request: RemoteOperationRequest,
-        ) -> ExecutionFuture<'a> {
-            Box::pin(async move {
-                let global = self.global_active.fetch_add(1, Ordering::SeqCst) + 1;
-                self.max_global_active.fetch_max(global, Ordering::SeqCst);
-                {
-                    let mut active = recover_lock(&self.active);
-                    let count = active.entry(host.id.clone()).or_default();
-                    *count += 1;
-                    if *count > 1 {
-                        self.same_host_overlap.store(true, Ordering::SeqCst);
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(75)).await;
-                {
-                    let mut active = recover_lock(&self.active);
-                    *active.get_mut(&host.id).unwrap() -= 1;
-                }
-                self.global_active.fetch_sub(1, Ordering::SeqCst);
-                ExecutionOutcome::Succeeded
-            })
-        }
-    }
-
-    async fn test_database(
-        executor: Arc<dyn RemoteOperationExecutor>,
-    ) -> (
-        TempDir,
-        String,
-        SqlitePool,
-        SecretBox,
-        OperationManager,
-        String,
-    ) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("operations.sqlite3");
-        let database_url = format!("sqlite://{}", path.display());
-        let pool = db::open_or_initialize(&database_url).await.unwrap();
-        let secrets = SecretBox::new("test", [41; 32]).unwrap();
-        let host_id = insert_test_host(&pool, &secrets, "host-a").await;
-        let manager = OperationManager::new(
-            pool.clone(),
-            secrets.clone(),
-            HostMutationLocks::default(),
-            UpstreamClient::new().unwrap(),
-        )
-        .with_executor(executor);
-        (directory, database_url, pool, secrets, manager, host_id)
-    }
-
-    async fn insert_test_host(pool: &SqlitePool, secrets: &SecretBox, name: &str) -> String {
-        db::insert_host(
+    async fn test_manager() -> OperationManager {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::initialize_empty(&pool).await.unwrap();
+        OperationManager::new(
             pool,
-            secrets,
-            HostSaveRequest {
-                name: name.into(),
-                host: "127.0.0.1".into(),
-                web_port: 47_990,
-                username: "sunshine".into(),
-                password: Some("upstream-password".into()),
-            },
-            ACTOR,
-        )
-        .await
-        .unwrap()
-        .id
-    }
-
-    async fn wait_for_state(
-        manager: &OperationManager,
-        operation_id: &str,
-        expected: OperationState,
-    ) {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let view = manager.get_for_actor(ACTOR, operation_id).await.unwrap();
-                if view.state == expected {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("operation did not reach its expected state");
-    }
-
-    #[tokio::test]
-    async fn same_host_waits_but_different_hosts_run_concurrently() {
-        let locks = HostMutationLocks::default();
-        let first = locks.lock("host-a").await;
-
-        let same_locks = locks.clone();
-        let mut same_host = tokio::spawn(async move {
-            let _guard = same_locks.lock("host-a").await;
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut same_host)
-                .await
-                .is_err()
-        );
-
-        tokio::time::timeout(Duration::from_secs(1), locks.lock("host-b"))
-            .await
-            .expect("a different host must not be blocked");
-
-        drop(first);
-        tokio::time::timeout(Duration::from_secs(1), same_host)
-            .await
-            .expect("the waiter must proceed after the host lock is released")
-            .expect("the waiter task must not panic");
-
-        let expired = locks.lock("expired-host").await;
-        assert_eq!(locks.entry_count(), 1);
-        drop(expired);
-        let _current = locks.lock("current-host").await;
-        assert_eq!(locks.entry_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn idempotency_is_conflict_safe_and_sensitive_requests_are_encrypted() {
-        let (_directory, _url, pool, secrets, manager, host_id) =
-            test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
-        let request = RemoteOperationRequest::Pin {
-            pin: "8642".into(),
-            name: "private-laptop".into(),
-        };
-        let first = manager
-            .enqueue(ACTOR, &host_id, "pair-request-1", request.clone())
-            .await
-            .unwrap();
-        let repeated = manager
-            .enqueue(ACTOR, &host_id, "pair-request-1", request)
-            .await
-            .unwrap();
-        assert_eq!(first.operation_id, repeated.operation_id);
-
-        let conflict = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "pair-request-1",
-                RemoteOperationRequest::Pin {
-                    pin: "9753".into(),
-                    name: "private-laptop".into(),
-                },
-            )
-            .await;
-        assert!(matches!(conflict, Err(AppError::Conflict(_))));
-
-        let (ciphertext, fingerprint, key_hash): (String, Vec<u8>, Vec<u8>) = sqlx::query_as(
-            "SELECT request_ciphertext,request_fingerprint,idempotency_key_hash \
-                 FROM operations WHERE operation_id=?",
-        )
-        .bind(&first.operation_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(ciphertext.starts_with("sunshine:v1:"));
-        assert!(!ciphertext.contains("8642"));
-        assert!(!ciphertext.contains("private-laptop"));
-        let expected_plaintext = serde_json::to_string(&RemoteOperationRequest::Pin {
-            pin: "8642".into(),
-            name: "private-laptop".into(),
-        })
-        .unwrap();
-        assert_eq!(
-            secrets
-                .decrypt_operation_request(
-                    &first.operation_id,
-                    "sunshine.client.pair",
-                    &ciphertext,
-                )
-                .unwrap(),
-            expected_plaintext
-        );
-        assert_eq!(fingerprint.len(), 32);
-        assert_eq!(key_hash.len(), 32);
-        assert_eq!(
-            fingerprint.as_slice(),
-            secrets
-                .operation_request_fingerprint(&expected_plaintext)
-                .as_slice()
-        );
-        assert_eq!(
-            key_hash.as_slice(),
-            secrets
-                .operation_idempotency_key_hash("pair-request-1")
-                .as_slice()
-        );
-        assert_ne!(
-            fingerprint,
-            Sha256::digest(expected_plaintext.as_bytes()).to_vec(),
-            "a low-entropy request must not retain its bare SHA-256 digest"
-        );
-        assert_ne!(
-            key_hash,
-            Sha256::digest(b"pair-request-1").to_vec(),
-            "an idempotency key must not retain its bare SHA-256 digest"
-        );
-        let stored_operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        let requested_events: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM audit_outbox WHERE event_kind='requested'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let audit_detail: String =
-            sqlx::query_scalar("SELECT detail FROM audit_outbox WHERE event_kind='requested'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stored_operations, 1);
-        assert_eq!(requested_events, 1);
-        assert!(!audit_detail.contains("8642"));
-        assert!(!audit_detail.contains("private-laptop"));
-
-        sqlx::query(
-            r#"CREATE TRIGGER reject_requested_outbox
-               BEFORE INSERT ON audit_outbox WHEN NEW.event_kind='requested'
-               BEGIN SELECT RAISE(ABORT, 'requested outbox rejected'); END"#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        let transaction_failed = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "pair-request-2",
-                RemoteOperationRequest::Pin {
-                    pin: "1111".into(),
-                    name: "must-rollback".into(),
-                },
-            )
-            .await;
-        assert!(transaction_failed.is_err());
-        let stored_operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            stored_operations, 1,
-            "operation and outbox must roll back together"
-        );
-
-        db::delete_host(&pool, &host_id, ACTOR).await.unwrap();
-        let after_host_removal = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "pair-request-1",
-                RemoteOperationRequest::Pin {
-                    pin: "8642".into(),
-                    name: "private-laptop".into(),
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(after_host_removal.operation_id, first.operation_id);
-
-        assert!(validate_idempotency_key("").is_err());
-        assert!(validate_idempotency_key("has whitespace").is_err());
-        assert!(validate_idempotency_key(&"x".repeat(129)).is_err());
-    }
-
-    #[tokio::test]
-    async fn moved_operation_ciphertext_is_rejected_at_startup_and_execution() {
-        let (_directory, _url, pool, secrets, manager, host_id) =
-            test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
-        let first = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "aad-operation-1",
-                RemoteOperationRequest::Pin {
-                    pin: "1111".into(),
-                    name: "first-client".into(),
-                },
-            )
-            .await
-            .unwrap();
-        let second = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "aad-operation-2",
-                RemoteOperationRequest::Pin {
-                    pin: "2222".into(),
-                    name: "second-client".into(),
-                },
-            )
-            .await
-            .unwrap();
-        let first_plaintext = serde_json::to_string(&RemoteOperationRequest::Pin {
-            pin: "1111".into(),
-            name: "first-client".into(),
-        })
-        .unwrap();
-        let bare_fingerprint = Sha256::digest(first_plaintext.as_bytes()).to_vec();
-        sqlx::query("UPDATE operations SET request_fingerprint=? WHERE operation_id=?")
-            .bind(bare_fingerprint.as_slice())
-            .bind(&first.operation_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(!db::doctor(&pool, &secrets).await.encrypted_values_ready);
-        assert!(
-            db::require_current_runtime_state(&pool, &secrets)
-                .await
-                .is_err()
-        );
-        let current_fingerprint = secrets.operation_request_fingerprint(&first_plaintext);
-        sqlx::query("UPDATE operations SET request_fingerprint=? WHERE operation_id=?")
-            .bind(current_fingerprint.as_slice())
-            .bind(&first.operation_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        db::require_current_runtime_state(&pool, &secrets)
-            .await
-            .unwrap();
-
-        let second_ciphertext: String =
-            sqlx::query_scalar("SELECT request_ciphertext FROM operations WHERE operation_id=?")
-                .bind(&second.operation_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        sqlx::query("UPDATE operations SET request_ciphertext=? WHERE operation_id=?")
-            .bind(second_ciphertext)
-            .bind(&first.operation_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        assert!(
-            db::require_current_runtime_state(&pool, &secrets)
-                .await
-                .is_err()
-        );
-        manager.execute_one(&first.operation_id, &host_id).await;
-        let failed = manager
-            .get_for_actor(ACTOR, &first.operation_id)
-            .await
-            .unwrap();
-        assert_eq!(failed.state, OperationState::Failed);
-        let error_code: String =
-            sqlx::query_scalar("SELECT error_code FROM operations WHERE operation_id=?")
-                .bind(&first.operation_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(error_code, "request_corrupt");
-    }
-
-    #[tokio::test]
-    async fn terminal_transitions_are_persisted_with_completion_outbox() {
-        let (_directory, _url, pool, _secrets, manager, host_id) =
-            test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
-        let succeeded = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "terminal-success",
-                RemoteOperationRequest::Restart,
-            )
-            .await
-            .unwrap();
-        manager.execute_one(&succeeded.operation_id, &host_id).await;
-        let succeeded = manager
-            .get_for_actor(ACTOR, &succeeded.operation_id)
-            .await
-            .unwrap();
-        assert_eq!(succeeded.state, OperationState::Succeeded);
-        assert_eq!(succeeded.attempt, 1);
-        assert!(succeeded.started_at_micros.is_some());
-        assert!(succeeded.completed_at_micros.is_some());
-
-        let failed_manager =
-            manager
-                .clone()
-                .with_executor(Arc::new(FixedExecutor(ExecutionOutcome::Failed(
-                    "definitive_rejection",
-                ))));
-        let failed = failed_manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "terminal-failed",
-                RemoteOperationRequest::ResetDisplay,
-            )
-            .await
-            .unwrap();
-        failed_manager
-            .execute_one(&failed.operation_id, &host_id)
-            .await;
-        assert_eq!(
-            failed_manager
-                .get_for_actor(ACTOR, &failed.operation_id)
-                .await
-                .unwrap()
-                .state,
-            OperationState::Failed
-        );
-
-        let unknown_manager =
-            manager
-                .clone()
-                .with_executor(Arc::new(FixedExecutor(ExecutionOutcome::Unknown(
-                    "result_uncertain",
-                ))));
-        let unknown = unknown_manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "terminal-unknown",
-                RemoteOperationRequest::AppsClose,
-            )
-            .await
-            .unwrap();
-        unknown_manager
-            .execute_one(&unknown.operation_id, &host_id)
-            .await;
-        let view = unknown_manager
-            .get_for_actor(ACTOR, &unknown.operation_id)
-            .await
-            .unwrap();
-        assert_eq!(view.state, OperationState::Unknown);
-        assert!(
-            unknown_manager
-                .get_for_actor("other-actor", &unknown.operation_id)
-                .await
-                .is_err()
-        );
-        let public_json = serde_json::to_value(view).unwrap();
-        for forbidden in ["actor", "action", "request", "error_code", "error_message"] {
-            assert!(public_json.get(forbidden).is_none());
-        }
-
-        let completion_events: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM audit_outbox WHERE event_kind='completed'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(completion_events, 3);
-    }
-
-    #[tokio::test]
-    async fn fake_transport_maps_success_rejection_and_uncertainty_conservatively() {
-        let (_directory, _url, pool, secrets, _manager, host_id) =
-            test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
-        let host = db::get_host(&pool, &secrets, &host_id).await.unwrap();
-        let executor = SunshineExecutor {
-            transport: Arc::new(FakeMutationTransport(FakeTransportResult::Success)),
-        };
-        assert!(matches!(
-            executor
-                .execute(host.clone(), RemoteOperationRequest::Restart)
-                .await,
-            ExecutionOutcome::Succeeded
-        ));
-        let executor = SunshineExecutor {
-            transport: Arc::new(FakeMutationTransport(FakeTransportResult::Rejected)),
-        };
-        assert!(matches!(
-            executor
-                .execute(host.clone(), RemoteOperationRequest::ResetDisplay)
-                .await,
-            ExecutionOutcome::Failed("upstream_rejected")
-        ));
-        let executor = SunshineExecutor {
-            transport: Arc::new(FakeMutationTransport(FakeTransportResult::Uncertain)),
-        };
-        assert!(matches!(
-            executor
-                .execute(host, RemoteOperationRequest::AppsClose)
-                .await,
-            ExecutionOutcome::Unknown("upstream_result_unknown")
-        ));
-    }
-
-    #[tokio::test]
-    async fn cover_request_is_encrypted_and_revalidated_before_remote_execution() {
-        let (_directory, _url, pool, _secrets, manager, host_id) =
-            test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
-        let operation = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "cover-policy-1",
-                RemoteOperationRequest::CoverUpload {
-                    key: "cover-1".into(),
-                    url: "https://covers.invalid/art.jpg?signature=private-token".into(),
-                },
-            )
-            .await
-            .unwrap();
-        let ciphertext: String =
-            sqlx::query_scalar("SELECT request_ciphertext FROM operations WHERE operation_id=?")
-                .bind(&operation.operation_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(!ciphertext.contains("private-token"));
-        manager.execute_one(&operation.operation_id, &host_id).await;
-        assert_eq!(
-            manager
-                .get_for_actor(ACTOR, &operation.operation_id)
-                .await
-                .unwrap()
-                .state,
-            OperationState::Failed
-        );
-        let error_code: String =
-            sqlx::query_scalar("SELECT error_code FROM operations WHERE operation_id=?")
-                .bind(&operation.operation_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(error_code, "cover_download_rejected");
-    }
-
-    #[tokio::test]
-    async fn restart_marks_running_unknown_and_resumes_pending_work() {
-        let (directory, database_url, pool, secrets, manager, host_id) =
-            test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
-        let interrupted = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "restart-running",
-                RemoteOperationRequest::Restart,
-            )
-            .await
-            .unwrap();
-        let pending = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "restart-pending",
-                RemoteOperationRequest::ResetDisplay,
-            )
-            .await
-            .unwrap();
-        assert!(
-            manager
-                .claim(&interrupted.operation_id)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        drop(manager);
-        pool.close().await;
-
-        let reopened = db::open_existing(&database_url).await.unwrap();
-        let restarted = OperationManager::new(
-            reopened.clone(),
-            secrets,
+            SecretBox::new("test", [2; 32]).unwrap(),
             HostMutationLocks::default(),
             UpstreamClient::new().unwrap(),
         )
-        .with_executor(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded)));
-        assert_eq!(restarted.recover_startup().await.unwrap(), 1);
-        assert_eq!(
-            restarted
-                .get_for_actor(ACTOR, &interrupted.operation_id)
-                .await
-                .unwrap()
-                .state,
-            OperationState::Unknown
-        );
-        assert_eq!(
-            restarted
-                .get_for_actor(ACTOR, &pending.operation_id)
-                .await
-                .unwrap()
-                .state,
-            OperationState::Pending
-        );
-
-        let runner = tokio::spawn(restarted.clone().run());
-        wait_for_state(&restarted, &pending.operation_id, OperationState::Succeeded).await;
-        runner.abort();
-        let _ = runner.await;
-        reopened.close().await;
-        drop(directory);
     }
 
-    #[tokio::test]
-    async fn outbox_delivery_is_transactional_and_idempotent() {
-        let (_directory, _url, pool, _secrets, manager, host_id) =
-            test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
+    async fn seed_claim(manager: &OperationManager, expires: i64) -> StoredOperation {
         manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "audit-delivery",
-                RemoteOperationRequest::Restart,
-            )
+            .store
+            .enqueue(NewOperation {
+                operation_id: "operation-test".into(),
+                namespace: NAMESPACE.into(),
+                target_key: "host-test".into(),
+                action: "sunshine.system.restart".into(),
+                idempotency_digest: [1; 32],
+                request_fingerprint: [2; 32],
+                request_payload: serde_json::to_vec(&DurablePayload {
+                    actor: "test-admin".into(),
+                    request_ciphertext: "opaque".into(),
+                })
+                .unwrap(),
+                max_attempts: 2,
+                created_at_micros: 1,
+                not_before_micros: 1,
+            })
             .await
             .unwrap();
-        sqlx::query(
-            r#"CREATE TRIGGER reject_outbox_audit
-               BEFORE INSERT ON audit_logs WHEN NEW.outbox_id IS NOT NULL
-               BEGIN SELECT RAISE(ABORT, 'audit delivery rejected'); END"#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert!(manager.deliver_outbox().await.is_err());
-        let delivered: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM audit_outbox WHERE delivered_at_micros IS NOT NULL",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        let audit_rows: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE outbox_id IS NOT NULL")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!((delivered, audit_rows), (0, 0));
-
-        sqlx::query("DROP TRIGGER reject_outbox_audit")
-            .execute(&pool)
+        manager
+            .store
+            .claim_next(NAMESPACE, "test-owner", 2, expires)
             .await
-            .unwrap();
-        assert_eq!(manager.deliver_outbox().await.unwrap(), 1);
-        sqlx::query("UPDATE audit_outbox SET delivered_at_micros=NULL")
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert_eq!(manager.deliver_outbox().await.unwrap(), 1);
-        let (audit_rows, attempts): (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT COUNT(*) FROM audit_logs WHERE outbox_id IS NOT NULL), \
-                    (SELECT delivery_attempt FROM audit_outbox)",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(audit_rows, 1);
-        assert_eq!(attempts, 2);
+            .unwrap()
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn completion_and_outbox_roll_back_together_then_retry_unknown_locally() {
-        let (_directory, _url, pool, _secrets, manager, host_id) =
-            test_database(Arc::new(FixedExecutor(ExecutionOutcome::Succeeded))).await;
-        let operation = manager
-            .enqueue(
-                ACTOR,
-                &host_id,
-                "completion-transaction",
-                RemoteOperationRequest::Restart,
-            )
-            .await
-            .unwrap();
-        sqlx::query(
-            r#"CREATE TRIGGER reject_completion_outbox
-               BEFORE INSERT ON audit_outbox WHEN NEW.event_kind='completed'
-               BEGIN SELECT RAISE(ABORT, 'completion outbox rejected'); END"#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        let execution = {
-            let manager = manager.clone();
-            let operation_id = operation.operation_id.clone();
-            let host_id = host_id.clone();
-            tokio::spawn(async move { manager.execute_one(&operation_id, &host_id).await })
-        };
-        let mut execution = execution;
+    async fn expired_completion_becomes_unknown_without_publishing_success() {
+        let manager = test_manager().await;
+        let claim = seed_claim(&manager, 10).await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(250), &mut execution)
+            manager
+                .finish(&claim, Transition::Succeed, Some(b"success"))
                 .await
-                .is_err(),
-            "unknown persistence must keep retrying locally"
+                .is_err()
         );
-        let state: String = sqlx::query_scalar("SELECT state FROM operations WHERE operation_id=?")
-            .bind(&operation.operation_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            state, "running",
-            "completion state cannot commit without its outbox"
-        );
+        manager.persist_unknown_without_reexecuting(&claim).await;
+        let current = manager.store.get("operation-test").await.unwrap().unwrap();
+        assert_eq!(current.operation.state, OperationState::Unknown);
+        assert!(current.result_payload.is_none());
+        assert_eq!(current.operation.attempt, 1);
+    }
 
-        sqlx::query("DROP TRIGGER reject_completion_outbox")
-            .execute(&pool)
+    #[tokio::test]
+    async fn completion_audit_failure_records_unknown_without_reexecution() {
+        let manager = test_manager().await;
+        let claim = seed_claim(&manager, db::now_micros().unwrap() + OPERATION_LEASE_MICROS).await;
+        sqlx::raw_sql("CREATE TRIGGER reject_success BEFORE INSERT ON _sarmg_operation_audit_outbox WHEN NEW.to_state='succeeded' BEGIN SELECT RAISE(FAIL, 'injected'); END;")
+            .execute(&manager.pool).await.unwrap();
+        assert!(
+            manager
+                .finish(&claim, Transition::Succeed, Some(b"success"))
+                .await
+                .is_err()
+        );
+        manager.persist_unknown_without_reexecuting(&claim).await;
+        let current = manager.store.get("operation-test").await.unwrap().unwrap();
+        assert_eq!(current.operation.state, OperationState::Unknown);
+        assert!(current.result_payload.is_none());
+        assert_eq!(manager.store.pending_audit_count().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn audit_delivery_and_human_resolution_are_atomic() {
+        let manager = test_manager().await;
+        let claim = seed_claim(&manager, 10).await;
+        manager.persist_unknown_without_reexecuting(&claim).await;
+        sqlx::raw_sql("CREATE TRIGGER reject_ack BEFORE UPDATE OF delivered_at_micros ON _sarmg_operation_audit_outbox BEGIN SELECT RAISE(FAIL, 'injected'); END;")
+            .execute(&manager.pool).await.unwrap();
+        assert!(manager.deliver_outbox().await.is_err());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit_logs")
+                .fetch_one(&manager.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("DROP TRIGGER reject_ack")
+            .execute(&manager.pool)
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(2), execution)
-            .await
-            .expect("unknown persistence retry did not finish")
-            .unwrap();
+        assert_eq!(manager.deliver_outbox().await.unwrap(), 3);
+        assert_eq!(manager.deliver_outbox().await.unwrap(), 0);
+        sqlx::raw_sql("CREATE TRIGGER reject_resolution BEFORE INSERT ON audit_logs WHEN NEW.action='operation.resolve' BEGIN SELECT RAISE(FAIL, 'injected'); END;")
+            .execute(&manager.pool).await.unwrap();
+        assert!(
+            manager
+                .resolve_for_actor(
+                    "test-admin",
+                    "operation-test",
+                    sarmg_operations::Resolution::ConfirmedSucceeded
+                )
+                .await
+                .is_err()
+        );
         assert_eq!(
             manager
-                .get_for_actor(ACTOR, &operation.operation_id)
+                .store
+                .get("operation-test")
                 .await
                 .unwrap()
+                .unwrap()
+                .operation
                 .state,
             OperationState::Unknown
         );
-        let completion_events: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM audit_outbox WHERE operation_id=? AND event_kind='completed'",
-        )
-        .bind(&operation.operation_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(completion_events, 1);
+        sqlx::query("DROP TRIGGER reject_resolution")
+            .execute(&manager.pool)
+            .await
+            .unwrap();
+        assert!(
+            manager
+                .resolve_for_actor(
+                    "other-admin",
+                    "operation-test",
+                    sarmg_operations::Resolution::ConfirmedSucceeded
+                )
+                .await
+                .is_err()
+        );
+        let resolved = manager
+            .resolve_for_actor(
+                "test-admin",
+                "operation-test",
+                sarmg_operations::Resolution::UnableToConfirm,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.state, OperationState::DeadLetter);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn operation_execution_serializes_each_host_and_parallelizes_hosts() {
-        let executor = Arc::new(ConcurrencyExecutor::default());
-        let (_directory, _url, pool, secrets, manager, host_a) =
-            test_database(executor.clone()).await;
-        let host_b = insert_test_host(&pool, &secrets, "host-b").await;
-        let first = manager
-            .enqueue(
-                ACTOR,
-                &host_a,
-                "parallel-a-1",
-                RemoteOperationRequest::Restart,
+    #[tokio::test]
+    async fn preexisting_shutdown_does_not_claim_work() {
+        let manager = test_manager().await;
+        let claim = seed_claim(&manager, db::now_micros().unwrap() + OPERATION_LEASE_MICROS).await;
+        manager
+            .finish(
+                &claim,
+                Transition::Fail {
+                    code: "rejected".into(),
+                    retryable: true,
+                    retry_not_before_micros: 1,
+                },
+                None,
             )
             .await
             .unwrap();
-        let second = manager
-            .enqueue(
-                ACTOR,
-                &host_a,
-                "parallel-a-2",
-                RemoteOperationRequest::ResetDisplay,
-            )
-            .await
-            .unwrap();
-        let other = manager
-            .enqueue(
-                ACTOR,
-                &host_b,
-                "parallel-b-1",
-                RemoteOperationRequest::Restart,
-            )
-            .await
-            .unwrap();
+        let store = manager.store.clone();
+        let (shutdown, receiver) = watch::channel(true);
+        manager.run_until(receiver).await.unwrap();
+        assert_eq!(store.active_operation_count().await.unwrap(), 1);
+        let current = store.get("operation-test").await.unwrap().unwrap();
+        assert_eq!(current.operation.state, OperationState::Pending);
+        assert_eq!(current.operation.attempt, 1);
+        drop(shutdown);
+    }
 
-        let first_task = {
-            let manager = manager.clone();
-            let host = host_a.clone();
-            tokio::spawn(async move { manager.execute_one(&first.operation_id, &host).await })
-        };
-        let second_task = {
-            let manager = manager.clone();
-            let host = host_a.clone();
-            tokio::spawn(async move { manager.execute_one(&second.operation_id, &host).await })
-        };
-        let other_task = {
-            let manager = manager.clone();
-            let host = host_b.clone();
-            tokio::spawn(async move { manager.execute_one(&other.operation_id, &host).await })
-        };
-        first_task.await.unwrap();
-        second_task.await.unwrap();
-        other_task.await.unwrap();
+    #[test]
+    fn idempotency_scope_binds_actor_target_action_and_key() {
+        let key = [7; 32];
+        let baseline = scoped_idempotency_digest("actor", "host", "action", &key);
+        assert_ne!(
+            baseline,
+            scoped_idempotency_digest("other", "host", "action", &key)
+        );
+        assert_ne!(
+            baseline,
+            scoped_idempotency_digest("actor", "other", "action", &key)
+        );
+        assert_ne!(
+            baseline,
+            scoped_idempotency_digest("actor", "host", "other", &key)
+        );
+    }
 
-        assert!(!executor.same_host_overlap.load(Ordering::SeqCst));
-        assert!(executor.max_global_active.load(Ordering::SeqCst) >= 2);
-        let succeeded: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE state='succeeded'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(succeeded, 3);
+    #[tokio::test]
+    async fn host_lock_registry_does_not_retain_unused_targets() {
+        let locks = HostMutationLocks::default();
+        {
+            let _guard = locks.lock("host").await;
+            assert_eq!(locks.entry_count(), 1);
+        }
+        let _guard = locks.lock("other").await;
+        assert_eq!(locks.entry_count(), 1);
+    }
+
+    #[test]
+    fn idempotency_keys_are_required_and_bounded() {
+        assert!(validate_idempotency_key("request:1").is_ok());
+        assert!(validate_idempotency_key("").is_err());
     }
 }

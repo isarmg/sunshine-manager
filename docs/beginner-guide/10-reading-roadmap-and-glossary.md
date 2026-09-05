@@ -38,7 +38,7 @@ policy/proxy，最后看 Web、release 和部署。先理解权威状态，再�
 | SSRF | 服务端被诱导访问敏感网络目标 |
 | DNS rebinding | 同一名称在校验与执行时解析为不同目标 |
 | pin | 把执行连接限制到校验通过的完整地址集合 |
-| credential envelope | `sunshine:v1:` 存储结构；只有在 external key 和记录身份/字段域 AAD 下认证成功才是当前密文 |
+| credential envelope | `sunshine:sgev1:` 存储结构；只有在 external key 和记录身份/字段域 AAD 下认证成功才是当前密文 |
 | source-bound | binary 身份绑定源码 revision |
 | maintenance lock | 产品与离线工具协调数据库访问的锁 |
 

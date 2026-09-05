@@ -114,23 +114,7 @@ pub struct CoverUploadRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationResolutionRequest {
-    pub resolution: OperationResolution,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationResolution {
-    ConfirmedSucceeded,
-    ConfirmedFailed,
-}
-
-impl OperationResolution {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ConfirmedSucceeded => "confirmed_succeeded",
-            Self::ConfirmedFailed => "confirmed_failed",
-        }
-    }
+    pub resolution: sarmg_operations::Resolution,
 }
 
 pub fn validate_host_request(request: &HostSaveRequest) -> AppResult<()> {

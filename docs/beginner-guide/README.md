@@ -25,7 +25,7 @@ Sunshine 是运行在被管理主机上的游戏串流服务；Sunshine Manager 
 ## 2. 目录与模块
 
 ```text
-sarmg-foundation                 管理员 Session、CSRF、登录限流与认证路由
+sarmg-foundation-server                 管理员 Session、CSRF、登录限流与认证路由
 src/client.rs                     Sunshine HTTP client
 src/operations.rs                 持久异步操作、幂等和恢复
 src/cover_policy.rs               外部封面 URL 准入
@@ -71,7 +71,7 @@ route 错写成已经存在的按钮或表单。
 Sunshine Host 密码及未完成操作请求使用当前 `SUNSHINE_MANAGER_CREDENTIAL_KEY` 加密。数据库只保存
 密文和 key ID。AES-256-GCM 的 AAD 还认证数据用途和记录身份：Host password 绑定 Host ID/`secret`
 字段域，operation request 绑定 operation ID/action/`request_ciphertext` 字段域。因此不能把一行的合法密文
-复制到另一行或另一字段；即使 key、nonce/ciphertext/tag 和 `sunshine:v1:` 前缀本身均合法也会认证失败。
+复制到另一行或另一字段；即使 key、nonce/ciphertext/tag 和 `sunshine:sgev1:` 前缀本身均合法也会认证失败。
 运行时只接受一个当前 key，不尝试其他 key，也不尝试空 AAD。产品运行时没有换 key/重新加密或恢复命令；未来
 只有 `sarmg-upgrade` 明确登记的具体 edge 才能承担转换。数据库副本没有对应 external key 时不可使用，
 数据库与 key 可以作为一个安全单元交给 `sarmg-upgrade` 的 Sunshine 0.8.0 current-state 命令备份和恢复；

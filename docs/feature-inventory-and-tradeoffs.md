@@ -41,12 +41,12 @@
 | SUN-033 | Operation 请求用 credential key 加密，AAD 绑定产品域、operation ID、action 和 `request_ciphertext` 字段域；启动/worker 还原严格当前 enum 并核对 action | `SecretBox::encrypt_operation_request`、`SecretBox::decrypt_operation_request`、`request_ciphertext`、`RemoteOperationRequest` | 保障 | 高 | 删除加密会暴露 PIN/配置/封面 URL；删除 AAD 或 enum/action 复验会允许密文跨 operation/action 替换或非当前请求潜伏到 worker | round-trip、随机 nonce、跨 operation/action/用途调换、空 AAD/unknown field/action mismatch、明文扫描 |
 | SUN-034 | `Idempotency-Key` 仅接受 1–128 个安全 ASCII 字符 | route header parser | 保障 | 低 | 无界或歧义键会污染索引、日志和代理链 | 空、129、Unicode、非法符号 |
 | SUN-035 | 幂等身份绑定 actor/Host/action/key 与请求 fingerprint；request 和 key 分别使用独立 HKDF key 的 HMAC-SHA-256 | `operation_request_fingerprint`、`operation_idempotency_key_hash`、`constant_time_equal_32`、SQLite 唯一约束 | 保障 | 高 | 删除幂等会重复副作用；使用裸 SHA-256 会让数据库泄漏者离线枚举低熵 PIN/键；共用域会允许协议值混淆 | 同值稳定、同键同体/异体、跨 Host/action、跨域不同、换 master key 不同、低熵值不等于裸 SHA-256、constant-time 比较 |
-| SUN-036 | Operation 查询/重试/解决均绑定当前管理员 actor | `get_for_actor`、`retry_for_actor`、`resolve_for_actor` | 保障 | 中 | 知道 operation ID 的其他主体可能读取或改变处理结论 | 错 actor 返回、ID 边界 |
+| SUN-036 | Operation 查询/解决均绑定当前管理员 actor | `get_for_actor`、`resolve_for_actor` | 保障 | 中 | 知道 operation ID 的其他主体可能读取或改变处理结论 | 错 actor 返回、ID 边界 |
 | SUN-037 | 同一 Host mutation 串行、不同 Host 可并行 | `HostMutationLocks`、弱引用锁注册表 | 保障 | 高 | 同 Host 写入可能乱序；若改成全局锁则任一慢 Host 阻塞全站 | 同/异 Host 并发、锁项回收 |
 | SUN-038 | worker 同时活跃 Host 最多 16 个 | `MAX_ACTIVE_HOSTS` | 保障 | 中 | 无界并发会打满连接/数据库；过低会降低多 Host 吞吐 | 17 Host 调度、完成后补位 |
 | SUN-039 | 启动时把中断的 `running` 原子转为 `unknown` | `recover_startup`、completion outbox | 保障 | 高 | 重启后可能重复已生效操作或永远卡在 running | 崩溃恢复、outbox、pending 不受影响 |
-| SUN-040 | 仅四类目标状态可核验的动作允许人工重排原 operation | `retry_for_actor` 中 app save、client unpair/all、config save allowlist | 保障 | 高 | 扩大 allowlist 可能重复不可逆动作；删除则可恢复故障全部人工化；代码不会自动比对远端状态 | 动作矩阵、unknown/failed、attempt 上限 |
-| SUN-041 | `attempt/max_attempts` 对人工安全重试计数并以 dead-letter 收口 | `operations` 表、`retry_for_actor`、`finalize` | 建议保留 | 中 | 永久故障可被人工无限重放，或无法区分已耗尽任务；当前没有一般性自动重试 | 尝试计数、第三次非成功进入 dead-letter、不可再 claim |
+| SUN-040 | Unknown 和终态永不重排执行 | Foundation transition；仅提供 resolve | 保障 | 高 | 人工重排仍可能重复不可逆副作用 | Unknown 阻塞同 Host；人工确认后再处理新意图 |
+| SUN-041 | Foundation 拥有 attempt/max_attempts 和 dead-letter 收口 | `_sarmg_operations`、Foundation transition | 保障 | 中 | 不得在产品内实现第二套状态转移或重放规则 | 有界尝试、终态不可再 claim |
 | SUN-042 | 只对 unknown/dead-letter 记录证据化 resolved | `OperationResolution`、resolved outbox | 建议保留 | 中 | 管理员核验 Sunshine 后无法留下有责结论 | confirmed 两值、其他状态冲突、原结果不改写 |
 | SUN-043 | 对外 `OperationView` 排除 actor/action/request/上游错误正文 | 专用序列化 DTO | 保障 | 中 | 查询接口会泄露敏感意图、身份或远端诊断 | JSON exact-shape、全终态 |
 | SUN-044 | 调度与 outbox 每批最多 128，空闲轮询 250ms | `DISPATCH_BATCH`、`OUTBOX_BATCH`、`IDLE_POLL` | 保障 | 中 | 无界扫描会拖垮 SQLite；过小会增加积压延迟 | 大于一批、通知唤醒、空队列 |
@@ -151,7 +151,7 @@ Server 不终止浏览器侧 TLS，也不自行注入 HSTS/CSP；这些响应策
 - 只接受 `sunshine-manager 0.8.0`、Schema revision 2、SHA-256
   `c9dedb33dd7a5ad613e762eb135a7aa5184ce1df52166459bee7b3485b4b3be3`。
 - 只接受配置的当前 credential key ID/key；没有 previous-key keyring。
-- 只接受当前带记录身份 AAD 的 `sunshine:v1:` envelope；相同文本前缀的空 AAD/旧密文仍会认证失败，
+- 只接受当前带记录身份 AAD 的 `sunshine:sgev1:` envelope；相同文本前缀的空 AAD/非当前密文仍会认证失败，
   不通过降级解密、试错 AAD 或跨行重加密兼容。
 - 只接受当前 HKDF 分域 HMAC-SHA-256 request fingerprint/Idempotency-Key hash；没有裸 SHA-256、共用
   HMAC key、previous master key 或失败后试算其他算法的分支。
@@ -213,7 +213,7 @@ API 不属于支持范围。
 | succeeded | 可证明上游成功 | 刷新 Host actual state |
 | failed | 可证明业务拒绝/未成功 | 展示安全 error code，修正后新意图 |
 | unknown | 上游副作用无法证明 | 人工查询 Sunshine，禁止盲重试 |
-| dead_letter/resolved | 达到允许的人工安全重试次数，或经人工确认 | 保留审计与确认者，不伪造原结果 |
+| dead_letter/resolved | 重试预算耗尽、封存或经人工确认 | 保留审计与确认者，不伪造原结果，不重放 |
 
 相同 actor/Host/action/Idempotency-Key 与相同请求返回原 operation；不同请求复用键返回冲突。当前 Host
 CRUD 没有 revision 或 `If-Match`，同一进程内虽按 Host 加锁，两个已登录页面仍是后写覆盖先写。若未来要
@@ -260,7 +260,7 @@ CRUD 没有 revision 或 `If-Match`，同一进程内虽按 Host 加锁，两个
 绕过该工具复制文件不能被描述成可恢复承诺。
 只改 metadata 或 key ID 不能让错误状态变合法。
 
-`sunshine:v1:<key-id>:<base64(nonce|ciphertext|tag)>` 是存储 envelope，不是完整认证合同。当前实现为每个
+`sunshine:sgev1:<key-id>:<base64(SGEV envelope)>` 是存储 envelope，不是完整认证合同。当前实现为每个
 密文确定性构造 AAD：先加入固定格式域 `sunshine-manager:aes-256-gcm:aad:v1`，再加入用途域和记录组件；
 每个组件都以前置 64-bit big-endian 长度编码，避免分隔符歧义。Host 组件是 `host-credential`、Host ID、
 `secret`；operation 组件是 `operation-request`、operation ID、action、`request_ciphertext`。AAD 不写入
@@ -334,7 +334,6 @@ handler 中调用一次 Sunshine 并返回 200 不构成完整功能。
 | Cover | `GET .../covers/{index}`、`POST .../covers/upload` | index≤10000；上传 strict DTO + 幂等键 | 读取≤8 MiB；上传为 Operation |
 | Cover internal | `GET .../internal/hosts/{host}/operations/{op}/covers/{token}` | transport peer + 30s token 四元绑定 | 一次性图片，永不暴露 external URL |
 | Operation | `GET .../operations/{id}` | actor-bound admin | 脱敏 `OperationView` |
-| Operation | `POST .../operations/{id}/retry` | admin + CSRF；只允许四动作/两状态/未耗尽 | 原 operation 回到 pending |
 | Operation | `POST .../operations/{id}/resolve` | admin + CSRF；unknown/dead-letter | resolved + evidence outbox，不重放 |
 
 删除某个 route 时，必须同步删除 Web 调用、DTO、operation enum/action、数据库约束或索引、上游 client、
@@ -344,20 +343,20 @@ handler 中调用一次 Sunshine 并返回 200 不构成完整功能。
 
 | Action | 可能副作用 | 自动重试 | 人工 retry API | 断线默认 | 删除闭包重点 |
 |---|---|---|---|---|---|
-| app save | 新增/覆盖应用 | 无 | 有，复用原 operation，最多 3 attempt | unknown | 删除 AppsSave enum、route、Web、测试 |
+| app save | 新增/覆盖应用 | 无 | 无 | unknown | 删除 AppsSave enum、route、Web、测试 |
 | app close | 结束当前会话 | 无 | 无 | unknown | UI 仍需刷新 actual state |
 | app delete | 删除远端应用 | 无 | 无 | unknown | 清除 index 校验和 delete route |
-| client unpair | 撤销一个客户端 | 无 | 有，目标状态“已不存在”可比对 | unknown | 保留客户端列表读取或同时删域 |
-| client unpair all | 撤销全部客户端 | 无 | 有，目标状态“空集合”可比对 | unknown | 风险高，删除需同步 Web 确认 |
+| client unpair | 撤销一个客户端 | 无 | 无 | unknown | 保留客户端列表读取或同时删域 |
+| client unpair all | 撤销全部客户端 | 无 | 无 | unknown | 风险高，删除需同步 Web 确认 |
 | client update | 启停客户端 | 无 | 无 | unknown | enabled DTO 与上游 method 同删 |
-| config save | 覆盖远端配置对象 | 无 | 有，复用密文请求 | unknown | 删除 1 MiB object 校验与 action |
+| config save | 覆盖远端配置对象 | 无 | 无 | unknown | 删除 1 MiB object 校验与 action |
 | PIN pairing | 新建配对 | 无 | 无 | unknown | PIN/name 校验与审计同删 |
 | restart | 重启 Sunshine | 无 | 无 | unknown | 删除后不影响静态管理，但失去运行控制 |
 | reset display | 清除显示持久状态 | 无 | 无 | unknown | 删除专用上游 path 与按钮 |
 | cover upload | Sunshine 主动回取一次性 URL | 无 | 无 | unknown | policy/proxy/token/egress 是一个整体 |
 
-“人工 retry API”也不是重新提交：它保留同一 operation ID、请求密文、幂等身份和 attempt 计数。任何新
-action 默认不得进入 allowlist，必须先证明目标状态可从 Sunshine 安全比对。
+不提供人工 retry API 或兼容入口。Unknown 必须先根据远端事实人工 resolve；终态不会重新变成 pending。
+新意图必须由管理员明确发起，不能用新幂等键自动重放结果不确定的旧意图。
 
 ## 18. 删除功能时的依赖闭包
 

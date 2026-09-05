@@ -8,7 +8,7 @@ Sunshine 可能执行请求后在响应前断线。Manager 无法安全断言“
 ## 5.2 状态
 
 `pending` 等待执行；`running` 已由 worker claim；`succeeded` 可证明达到目标；`failed` 可证明拒绝/未执行；
-`unknown` 无法证明副作用；`dead_letter` 表示允许人工安全重试的动作已达到 `max_attempts`；`resolved`
+`unknown` 无法证明副作用且永不重放；`dead_letter` 表示重试预算耗尽或无法确认的操作已封存；`resolved`
 只追加管理员核验结论。终态不会因页面刷新而消失。
 
 ## 5.3 幂等键
@@ -46,8 +46,9 @@ SQLite 写事务。
 
 ## 5.8 Unknown 处置
 
-停止同一 Host 的盲目写入，读取 Sunshine actual state、日志和 operation 摘要。根据当前事实发起新的
-明确意图；不要编辑数据库或使用新 key 重复原动作来“碰碰运气”。
+停止同一 Host 的盲目写入，读取 Sunshine actual state、日志和 operation 摘要。通过 resolve 接口记录
+人工确认结果，解除该 Host 的不确定状态后，才可根据当前事实发起新的明确意图。
+不存在将终态或 unknown 重排回 pending 的 retry 接口；不要编辑数据库或换 key 盲目重放。
 
 ## 5.9 测试矩阵
 

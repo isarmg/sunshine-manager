@@ -1,5 +1,5 @@
 {
-  "extends": "@sarmg/admin-web/tsconfig.json",
+  "extends": "@sarmg/web-toolchain/tsconfig.json",
   "compilerOptions": {
     "noEmit": true
   },

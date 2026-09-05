@@ -31,7 +31,7 @@ fn release_tooling_targets_only_the_current_product_contract() {
 
     assert!(package_release.contains("VERSION = \"0.8.0\""));
     assert!(manifest_writer.contains("VERSION = \"0.8.0\""));
-    assert!(manifest_writer.contains("identity[\"schema_revision\"] != 2"));
+    assert!(manifest_writer.contains("identity[\"schema_revision\"] != 4"));
     assert!(systemd_unit.contains("/releases/0.8.0/"));
 
     for source in [package_release, manifest_writer, systemd_unit] {

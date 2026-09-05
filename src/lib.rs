@@ -1,7 +1,7 @@
 //! Sunshine Manager is an independent service for managing Sunshine hosts.
 //!
 //! Product state and Sunshine credentials remain local; shared platform
-//! metadata and administrator policy are supplied by sarmg-foundation.
+//! metadata and administrator policy are supplied by sarmg-foundation-server.
 
 pub mod client;
 pub mod config;

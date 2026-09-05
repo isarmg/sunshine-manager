@@ -1,3 +1,3 @@
-import { createSarmgReactViteConfig } from "@sarmg/admin-web/vite";
+import { createSarmgReactViteConfig } from "@sarmg/web-toolchain/vite";
 
 export default createSarmgReactViteConfig();

@@ -33,7 +33,7 @@ local、multicast 和 metadata 段，并限制 DNS resolver 与 Sunshine Host �
 ## 7.7 Schema/密文合同
 
 当前数据库由 code-owned DDL fingerprint 与 metadata 双验证；credential 只接受当前 external key/envelope。
-当前 envelope 文本仍为 `sunshine:v1:<key-id>:<base64(nonce|ciphertext|tag)>`，但 GCM 认证输入不只有密文：
+当前 envelope 文本为 `sunshine:sgev1:<key-id>:<base64(SGEV envelope)>`，但 GCM 认证输入不只有密文：
 代码用 `sunshine-manager:aes-256-gcm:aad:v1` 作为 AAD 格式域，并对每个组件使用 64-bit big-endian 长度分帧。
 Host credential 的组件为用途域 `host-credential`、Host ID、字段 `secret`；operation request 的组件为用途域
 `operation-request`、operation ID、action、字段 `request_ciphertext`。AAD 不另存数据库，而是由当前行身份

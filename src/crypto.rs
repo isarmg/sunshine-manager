@@ -1,19 +1,18 @@
-//! Product-owned authenticated encryption for Sunshine credentials and
-//! durable remote-operation requests.
+//! Sunshine-specific domains and lookup digests over Foundation secret types.
 
-use aes_gcm::{
-    Aes256Gcm, Key, Nonce,
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
-};
+use std::sync::Arc;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
+use sarmg_secret::{SecretBytes, SecretKey};
+use sarmg_secret_envelope::EnvelopeDomain;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use crate::error::{AppError, AppResult};
 
-const PREFIX: &str = "sunshine:v1:";
+const PREFIX: &str = "sunshine:sgev1:";
 const AAD_FORMAT: &[u8] = b"sunshine-manager:aes-256-gcm:aad:v1";
 const HOST_CREDENTIAL_DOMAIN: &[u8] = b"host-credential";
 const HOST_SECRET_FIELD: &[u8] = b"secret";
@@ -25,10 +24,22 @@ const REQUEST_FINGERPRINT_INFO: &[u8] =
 const IDEMPOTENCY_KEY_HASH_INFO: &[u8] =
     b"sunshine-manager:operation-idempotency-key-hash:hmac-sha256:v1";
 
+struct HostCredentialEnvelope;
+impl EnvelopeDomain for HostCredentialEnvelope {
+    const DOMAIN: &'static [u8] = b"sunshine-manager/host-credential";
+    const REVISION: u16 = 1;
+}
+
+struct OperationRequestEnvelope;
+impl EnvelopeDomain for OperationRequestEnvelope {
+    const DOMAIN: &'static [u8] = b"sunshine-manager/operation-request";
+    const REVISION: u16 = 1;
+}
+
 #[derive(Clone)]
 pub struct SecretBox {
     current_id: String,
-    current: [u8; 32],
+    current: Arc<SecretKey<32>>,
     request_fingerprint_key: [u8; 32],
     idempotency_key_hash_key: [u8; 32],
 }
@@ -46,7 +57,7 @@ impl SecretBox {
         )?;
         Ok(Self {
             current_id,
-            current,
+            current: Arc::new(SecretKey::new(current)),
             request_fingerprint_key,
             idempotency_key_hash_key,
         })
@@ -55,11 +66,11 @@ impl SecretBox {
     /// Seal one Host's Sunshine Basic Auth password. The authenticated context
     /// prevents a valid ciphertext from being moved to another Host or field.
     pub fn encrypt_host_credential(&self, host_id: &str, value: &str) -> AppResult<String> {
-        self.encrypt_with_aad(value, &host_credential_aad(host_id))
+        self.encrypt::<HostCredentialEnvelope>(value, &host_credential_aad(host_id))
     }
 
     pub fn decrypt_host_credential(&self, host_id: &str, value: &str) -> AppResult<String> {
-        self.decrypt_with_aad(value, &host_credential_aad(host_id))
+        self.decrypt::<HostCredentialEnvelope>(value, &host_credential_aad(host_id))
     }
 
     /// Seal one durable operation request. Both the row identity and declared
@@ -71,7 +82,10 @@ impl SecretBox {
         action: &str,
         value: &str,
     ) -> AppResult<String> {
-        self.encrypt_with_aad(value, &operation_request_aad(operation_id, action))
+        self.encrypt::<OperationRequestEnvelope>(
+            value,
+            &operation_request_aad(operation_id, action),
+        )
     }
 
     pub fn decrypt_operation_request(
@@ -80,11 +94,19 @@ impl SecretBox {
         action: &str,
         value: &str,
     ) -> AppResult<String> {
-        self.decrypt_with_aad(value, &operation_request_aad(operation_id, action))
+        self.decrypt::<OperationRequestEnvelope>(
+            value,
+            &operation_request_aad(operation_id, action),
+        )
     }
 
-    fn encrypt_with_aad(&self, value: &str, aad: &[u8]) -> AppResult<String> {
-        let payload = seal(&self.current, value.as_bytes(), aad)?;
+    fn encrypt<D: EnvelopeDomain>(&self, value: &str, binding: &[u8]) -> AppResult<String> {
+        let payload = sarmg_secret_envelope::seal::<D>(
+            &self.current,
+            binding,
+            &SecretBytes::new(value.as_bytes().to_vec()),
+        )
+        .map_err(|_| AppError::Crypto)?;
         Ok(format!(
             "{PREFIX}{}:{}",
             self.current_id,
@@ -92,14 +114,16 @@ impl SecretBox {
         ))
     }
 
-    fn decrypt_with_aad(&self, value: &str, aad: &[u8]) -> AppResult<String> {
+    fn decrypt<D: EnvelopeDomain>(&self, value: &str, binding: &[u8]) -> AppResult<String> {
         let rest = value.strip_prefix(PREFIX).ok_or(AppError::Crypto)?;
         let (id, payload) = rest.split_once(':').ok_or(AppError::Crypto)?;
         if id != self.current_id {
             return Err(AppError::Crypto);
         }
-        let plaintext = open(&self.current, &decode_payload(payload)?, aad)?;
-        String::from_utf8(plaintext).map_err(|_| AppError::Crypto)
+        let payload = decode_payload(payload)?;
+        let plaintext = sarmg_secret_envelope::open::<D>(&self.current, binding, &payload)
+            .map_err(|_| AppError::Crypto)?;
+        String::from_utf8(plaintext.expose().to_vec()).map_err(|_| AppError::Crypto)
     }
 
     /// Stable keyed fingerprint used only to decide whether a repeated
@@ -136,41 +160,6 @@ fn hmac_sha256(key: &[u8; 32], value: &[u8]) -> [u8; 32] {
         .expect("an HMAC-SHA-256 key accepts the derived 32-byte key");
     mac.update(value);
     mac.finalize().into_bytes().into()
-}
-
-fn seal(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> AppResult<Vec<u8>> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let mut payload = nonce.to_vec();
-    payload.extend(
-        cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: plaintext,
-                    aad,
-                },
-            )
-            .map_err(|_| AppError::Crypto)?,
-    );
-    Ok(payload)
-}
-
-fn open(key: &[u8; 32], payload: &[u8], aad: &[u8]) -> AppResult<Vec<u8>> {
-    if payload.len() <= 12 {
-        return Err(AppError::Crypto);
-    }
-    let (nonce, ciphertext) = payload.split_at(12);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    cipher
-        .decrypt(
-            Nonce::from_slice(nonce),
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
-        .map_err(|_| AppError::Crypto)
 }
 
 /// Length framing makes the deterministic context injective even if a future
@@ -320,11 +309,8 @@ mod tests {
                 .is_err()
         );
 
-        // This constructs the pre-AAD form only to prove that the current
-        // reader has no empty-AAD fallback or legacy compatibility branch.
-        let legacy_payload = seal(&[3; 32], b"password", b"").unwrap();
-        let legacy = format!("{PREFIX}source:{}", STANDARD.encode(legacy_payload));
-        assert!(source.decrypt_host_credential("host-a", &legacy).is_err());
+        let obsolete = format!("sunshine:v1:source:{}", STANDARD.encode(b"obsolete"));
+        assert!(source.decrypt_host_credential("host-a", &obsolete).is_err());
     }
 
     #[test]

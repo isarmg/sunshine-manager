@@ -1,115 +1,40 @@
-import { useAdministratorSession } from "@sarmg/admin-web/react";
+import { createSarmgAdminApplication, errorRequestId, useAdminApplication } from "@sarmg/admin-shell";
+import { Button, EmptyState, ErrorState, LoadingState, StatusBadge, Table } from "@sarmg/admin-ui";
 import { useEffect, useState } from "react";
-import type { FormEvent } from "react";
-import {
-  CURRENT_API_PREFIX,
-  adminApi,
-  currentErrorEnvelope,
-  isHostInfoArray,
-  requestJson,
-  type HostInfo,
-} from "./api";
+import { CURRENT_API_PREFIX, adminApi, isHostInfoArray, type HostInfo } from "./api";
 
-export default function App() {
-  const authentication = useAdministratorSession(adminApi);
-  const [hosts, setHosts] = useState<HostInfo[]>([]);
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-
+function HostsPage() {
+  const { client } = useAdminApplication();
+  const [hosts, setHosts] = useState<HostInfo[] | null>(null);
+  const [failure, setFailure] = useState<{ requestId?: string } | null>(null);
+  const [generation, setGeneration] = useState(0);
   useEffect(() => {
-    if (authentication.phase !== "authenticated") {
-      setHosts([]);
-      setError("");
-      return;
-    }
-    let cancelled = false;
-    requestJson(`${CURRENT_API_PREFIX}/sunshine/hosts`, isHostInfoArray)
-      .then((received) => {
-        if (!cancelled) setHosts(received);
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled) {
-          setError(currentErrorEnvelope(cause)?.message ?? "无法加载主机列表");
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [authentication.phase]);
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    try {
-      await authentication.login(username, password);
-      setError("");
-    } catch (cause) {
-      setError(currentErrorEnvelope(cause)?.message ?? "登录失败");
-    }
-  };
-
-  const leave = async () => {
-    try {
-      await authentication.logout();
-      setError("");
-    } catch (cause) {
-      setError(currentErrorEnvelope(cause)?.message ?? "退出失败");
-    }
-  };
-
-  if (authentication.phase === "loading") {
-    return <main>正在检查会话…</main>;
-  }
-
-  if (authentication.phase === "error") {
-    return (
-      <main>
-        <h1>Sunshine Manager</h1>
-        <p>{currentErrorEnvelope(authentication.error)?.message ?? "无法恢复会话"}</p>
-        <button onClick={() => void authentication.restore()}>重试</button>
-      </main>
-    );
-  }
-
-  if (authentication.phase === "anonymous") {
-    return (
-      <main>
-        <h1>Sunshine Manager</h1>
-        <form onSubmit={submit}>
-          <input
-            type="text"
-            name="username"
-            aria-label="管理员用户名"
-            autoComplete="username"
-            maxLength={64}
-            required
-            spellCheck={false}
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-          />
-          <input
-            type="password"
-            name="password"
-            aria-label="管理员密码"
-            autoComplete="current-password"
-            required
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-          />
-          <button type="submit">登录</button>
-        </form>
-        {error && <p>{error}</p>}
-      </main>
-    );
-  }
-
-  return (
-    <main>
-      <h1>Sunshine Manager</h1>
-      <p>{authentication.session.username}</p>
-      <button onClick={leave}>退出</button>
-      {error && <p>{error}</p>}
-      <pre>{JSON.stringify(hosts, null, 2)}</pre>
-    </main>
-  );
+    const controller = new AbortController();
+    setHosts(null); setFailure(null);
+    void client.request(`${CURRENT_API_PREFIX}/sunshine/hosts`, isHostInfoArray, { signal: controller.signal })
+      .then(received => { if (!controller.signal.aborted) setHosts(received); })
+      .catch(error => { if (!controller.signal.aborted) setFailure({ requestId: errorRequestId(error) }); });
+    return () => controller.abort();
+  }, [client, generation]);
+  const refresh = () => setGeneration(value => value + 1);
+  return <section id="hosts"><h1>Sunshine 主机</h1>
+    <Button onClick={refresh} disabled={hosts === null && failure === null}>刷新</Button>
+    {failure ? <ErrorState requestId={failure.requestId} onRetry={refresh}>无法加载主机列表</ErrorState>
+      : hosts === null ? <LoadingState>正在加载主机…</LoadingState>
+      : hosts.length === 0 ? <EmptyState>暂无主机</EmptyState>
+      : <Table aria-label="Sunshine 主机"><caption>主机状态</caption>
+        <thead><tr><th scope="col">名称</th><th scope="col">地址</th><th scope="col">连接</th></tr></thead>
+        <tbody>{hosts.map(host => <tr key={host.id}><th scope="row">{host.name}</th>
+          <td>{host.host}:{host.web_port}</td><td><StatusBadge status={
+            host.probe_status === "pending" ? "正在检测" : host.connected ? "已连接" : "未连接"
+          } /></td></tr>)}</tbody>
+      </Table>}
+  </section>;
 }
+
+export default createSarmgAdminApplication({
+  product: { name: "Sunshine Manager", version: "0.8.0" },
+  client: adminApi,
+  navigation: [{ label: "主机", href: "#hosts" }],
+  routes: <HostsPage />,
+});
