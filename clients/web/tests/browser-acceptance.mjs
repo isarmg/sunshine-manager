@@ -1,3 +1,4 @@
+import { checkWebLanguage } from "./language.mjs";
 import { checkHeaderActions, checkHeaderLogout } from "./header-actions.mjs";
 import assert from "node:assert/strict";
 import {chromium,firefox,expect} from "@playwright/test";
@@ -10,7 +11,7 @@ try {
  for(const engine of [chromium,firefox]){
   const browser=await engine.launch();
   try {
-   const context=await browser.newContext({viewport:{width:390,height:844}});const page=await context.newPage();const errors=[];const devices=[];let posts=0;
+   const context=await browser.newContext({ locale: "zh-CN", viewport:{width:390,height:844}});const page=await context.newPage();const errors=[];const devices=[];let posts=0;
    page.on("pageerror",e=>errors.push(e.message));
    await page.route("**/api/v2/**",async route=>{
     const req=route.request();const path=new URL(req.url()).pathname;
@@ -44,7 +45,7 @@ try {
    await expect(page.getByRole("region",{name:"Sunshine 实例"}).getByRole("button")).toHaveText("测试 Sunshine");
    const table=page.getByRole("table",{name:"Sunshine 实例列表"});
    await expect(table.locator("tbody tr")).toHaveCount(1);
-   await expect(table.getByRole("columnheader")).toHaveText(["实例名称","注册状态","Agent 状态","Sunshine 接口","配置状态","操作系统","最近连接"]);
+   await expect(table.getByRole("columnheader")).toHaveText(["实例名称","注册状态","客户端 状态","Sunshine 接口","配置状态","操作系统","最近连接"]);
    await expect(table.locator("tbody td")).toHaveText(["等待配对","离线","未知","尚未核对","尚未上报","尚未连接"]);
    assert.equal(await table.locator("tbody tr").evaluate(row=>getComputedStyle(row).display),"table-row");
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
@@ -62,9 +63,10 @@ try {
    }
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
    await expect(page.locator("body")).toContainText("不设有效期");
-   await page.getByRole("button",{name:"取消配对",exact:true}).click();await page.getByRole("button",{name:"Confirm",exact:true}).click();
+   await page.getByRole("button",{name:"取消配对",exact:true}).click();await page.getByRole("button",{name:"确认",exact:true}).click();
    await expect(page.getByText("配对已取消",{exact:true})).toBeVisible();
    await expect(page.getByText("配对码",{exact:true})).toHaveCount(0);
+      await checkWebLanguage(page, {"routes":[["instances","Instances"],["status","Device status"],["config","Sunshine configuration"],["tasks","Task history"]],"names":["测试 Sunshine"]});
    await checkHeaderLogout(page, session.csrf_token);
    assert.deepEqual(errors,[]);console.log(engine.name()+": Agent registration, name limits, CSRF, default appearance, mobile and WCAG passed");
   }finally{await browser.close();}

@@ -66,14 +66,14 @@ try {
   await new Promise(done=>ingress.listen(0,"127.0.0.1",done));
   const browser=await chromium.launch();const errors=[];
   try {
-   const page=await browser.newPage();page.on("pageerror",e=>errors.push(e.message));
-   await page.goto(base);await page.getByLabel("Username",{exact:true}).fill("admin");await page.getByLabel("Password",{exact:true}).fill(password);
-   await page.getByRole("button",{name:"Sign in",exact:true}).click();
+   const page=await browser.newPage({ locale: "zh-CN" });page.on("pageerror",e=>errors.push(e.message));
+   await page.goto(base);await page.getByLabel("用户名",{exact:true}).fill("admin");await page.getByLabel("密码",{exact:true}).fill(password);
+   await page.getByRole("button",{name:"登录",exact:true}).click();
    await page.getByRole("button",{name:"新建实例",exact:true}).click();
    await page.getByLabel("实例名称",{exact:true}).fill("Agent 闭环测试");
-   const created=page.waitForResponse(r=>r.url().endsWith("/sunshine/devices")&&r.request().method()==="POST");
+   const created=page.waitForResponse(r=>r.url().endsWith("/sunshine/devices")&&r.request().method()==="POST").then(async response=>{await response.finished();return response.json()});
    await page.getByRole("button",{name:"创建实例",exact:true}).click();
-   const ticket=await(await created).json();const id=ticket.device.id;const api="/api/v2/sunshine/devices/"+id;
+   const ticket=await created;const id=ticket.device.id;const api="/api/v2/sunshine/devices/"+id;
    const bootstrap=join(root,"bootstrap.json"),state=join(root,"agent");
    await writeFile(bootstrap,JSON.stringify({manager_endpoint:"wss://127.0.0.1:"+ingress.address().port+"/sunshine-agent/v1/connect",manager_ca_pem:await readFile(caCert,"utf8"),manager_id:ticket.manager_id,device_id:id,enrollment_token:ticket.token,sunshine_endpoint:"https://127.0.0.1:"+sunshine.address().port+"/",sunshine_ca_pem:await readFile(caCert,"utf8"),sunshine_username:"fixture",sunshine_password:"local-only-password",restart_allowed:true}),{mode:0o600});
    await exec(agentBinary,["init","--state",state,"--bootstrap",bootstrap]);
@@ -83,7 +83,7 @@ try {
    await expect.poll(async()=>(await device()).sunshine_reachable,{timeout:20000}).toBe(true);
    await page.getByRole("button",{name:"刷新",exact:true}).click();
    await page.getByRole("button",{name:"Sunshine 配置",exact:true}).click();
-   await page.getByLabel(/sunshine_name/).fill("网页保存");
+   await page.getByLabel("Sunshine 名称", { exact: true }).fill("网页保存");
    await page.getByRole("button",{name:"预览变更",exact:true}).click();
    const queued=page.waitForResponse(r=>r.url().endsWith("/tasks")&&r.request().method()==="POST");
    await page.getByRole("button",{name:"确认保存配置",exact:true}).click();

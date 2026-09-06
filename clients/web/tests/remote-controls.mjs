@@ -7,7 +7,7 @@ const server=await preview({preview:{host:"127.0.0.1",port:0,strictPort:true}});
 try {for(const engine of [chromium,firefox]){
  const browser=await engine.launch();
  try {
-  const page=await browser.newPage();const commands=[];const errors=[];const operations=[];
+  const page=await browser.newPage({ locale: "zh-CN" });const commands=[];const errors=[];const operations=[];
   page.on("pageerror",e=>errors.push(e.message));
   const device={id:randomUUID(),name:"游戏主机",registered:true,pairing_pending:false,revoked:false,agent_online:true,sunshine_reachable:true,configuration_state:"pending_verification",last_seen_at_micros:Date.now()*1000,capabilities:{restart_allowed:true,managed_fields:["sunshine_name","qp"]},snapshot:{revision:"a".repeat(64),sunshine_version:"2026.516.143833",fields:{sunshine_name:"Original",qp:"28"},effectiveness:"pending_verification"}};
   await page.route("**/api/v2/**",async route=>{
@@ -24,7 +24,7 @@ try {for(const engine of [chromium,firefox]){
   });
   await page.goto("http://127.0.0.1:"+server.httpServer.address().port);
   await page.getByRole("button",{name:"Sunshine 配置",exact:true}).click();
-  await page.getByLabel(/sunshine_name/).fill("New name");
+  await page.getByLabel("Sunshine 名称", { exact: true }).fill("New name");
   await page.getByRole("button",{name:"预览变更",exact:true}).click();
   await expect(page.getByRole("region",{name:"变更差异预览"})).toContainText("Original");
   await expect(page.getByRole("region",{name:"变更差异预览"})).toContainText("New name");
@@ -35,11 +35,11 @@ try {for(const engine of [chromium,firefox]){
   await page.getByRole("button",{name:"重启 Sunshine",exact:true}).click();
   const dialog=page.getByRole("dialog",{name:"确认重启 Sunshine"});
   await expect(dialog).toContainText("中断正在进行的串流");assert.equal(commands.length,1);
-  await dialog.getByRole("button",{name:"Confirm",exact:true}).click();
+  await dialog.getByRole("button",{name:"确认",exact:true}).click();
   await expect.poll(()=>commands.length).toBe(2);
   assert.equal(commands[1].administrator_confirmed,true);
   await page.getByRole("button",{name:"任务记录",exact:true}).click();
-  await expect(page.locator("body")).toContainText("restart_acknowledged");
+  await expect(page.locator("body")).toContainText("已确认重启请求");
   for(const forbidden of ["应用管理","配对 PIN","日志","诊断","重置显示设备"])await expect(page.getByRole("button",{name:forbidden,exact:true})).toHaveCount(0);
   assert.deepEqual(errors,[]);console.log(engine.name()+": typed Agent patch, diff, manual restart confirmation and task results passed");
  }finally{await browser.close();}

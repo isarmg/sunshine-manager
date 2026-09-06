@@ -59,7 +59,7 @@ try {
     const reads = [];
     let page;
     try {
-      page = await browser.newPage(); const errors = []; page.on("pageerror", error => errors.push(error.message));
+      page = await browser.newPage({ locale: "zh-CN" }); const errors = []; page.on("pageerror", error => errors.push(error.message));
       page.on("response", response => { if (response.status() >= 400) failures.push(`${response.status()} ${new URL(response.url()).pathname}`); });
       page.on("response", async response => {
         if (response.url().endsWith("/apps") && response.request().method() === "GET") {
@@ -67,14 +67,14 @@ try {
         }
       });
       page.on("requestfailed", request => failures.push(`${request.failure()?.errorText} ${new URL(request.url()).pathname}`));
-      await page.goto(base); await page.getByLabel("Username", { exact: true }).fill("admin"); await page.getByLabel("Password", { exact: true }).fill(password);
-      await page.getByRole("button", { name: "Sign in", exact: true }).click();
+      await page.goto(base); await page.getByLabel("用户名", { exact: true }).fill("admin"); await page.getByLabel("密码", { exact: true }).fill(password);
+      await page.getByRole("button", { name: "登录", exact: true }).click();
       await page.getByRole("button", { name: "新建实例", exact: true }).click();
       await page.getByLabel("实例名称", { exact: true }).fill("Sunshine TLS 测试"); await page.getByLabel("主机地址", { exact: true }).fill("127.0.0.1");
       await page.getByLabel("Web 端口", { exact: true }).fill(String(upstream.address().port)); await page.getByLabel("Sunshine 用户名", { exact: true }).fill("fixture");
       await page.getByLabel("Sunshine 密码", { exact: true }).fill("fixture-password"); await page.getByRole("button", { name: "创建实例", exact: true }).click();
       const tab = name => page.getByRole("navigation", { name: "Sunshine 实例功能" }).getByRole("button", { name, exact: true });
-      const confirm = async title => { await page.getByRole("dialog", { name: title, exact: true }).getByRole("button", { name: "Confirm", exact: true }).click(); };
+      const confirm = async title => { await page.getByRole("dialog", { name: title, exact: true }).getByRole("button", { name: "确认", exact: true }).click(); };
       let lastOperation;
       const completed = async (mutation, expected = "执行成功") => {
         const received = page.waitForResponse(response => ["POST", "DELETE"].includes(response.request().method()) && response.status() === 202);

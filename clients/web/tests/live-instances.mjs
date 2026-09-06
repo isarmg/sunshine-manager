@@ -7,12 +7,12 @@ await withLocalServer({ prefix: "SUNSHINE_MANAGER", binary: "../../target/debug/
   extraEnv: { SUNSHINE_MANAGER_PRODUCTION: "false", SUNSHINE_MANAGER_CREDENTIAL_KEY: randomBytes(32).toString("base64"), SUNSHINE_MANAGER_CREDENTIAL_KEY_ID: "test" } }, async ({ base, password }) => {
   const browser = await chromium.launch();
   try {
-    const page = await browser.newPage(); const errors = [];
+    const page = await browser.newPage({ locale: "zh-CN" }); const errors = [];
     page.on("pageerror", error => errors.push(error.message));
     await page.goto(base);
-    await page.getByLabel("Username", { exact: true }).fill("admin");
-    await page.getByLabel("Password", { exact: true }).fill(password);
-    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page.getByLabel("用户名", { exact: true }).fill("admin");
+    await page.getByLabel("密码", { exact: true }).fill(password);
+    await page.getByRole("button", { name: "登录", exact: true }).click();
     await page.getByRole("button", { name: "新建实例", exact: true }).click();
     await page.getByLabel("实例名称", { exact: true }).fill("真实后端 Sunshine 测试");
     await page.getByLabel("主机地址", { exact: true }).fill("127.0.0.1");
@@ -49,7 +49,7 @@ await withLocalServer({ prefix: "SUNSHINE_MANAGER", binary: "../../target/debug/
     await page.getByRole("button", { name: "选择实例 第二个 Sunshine", exact: true }).click();
     await expect(page.getByLabel("Sunshine 用户名", { exact: true })).toHaveValue("second");
     await page.getByRole("button", { name: "删除实例", exact: true }).click();
-    await page.getByRole("button", { name: "Confirm", exact: true }).click();
+    await page.getByRole("button", { name: "确认", exact: true }).click();
     await expect(page.getByRole("button", { name: "选择实例 第二个 Sunshine", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "切换到深色模式", exact: true }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
