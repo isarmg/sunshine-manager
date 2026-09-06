@@ -14,7 +14,7 @@ export function DeviceRegistrationDialog({close,created}:{close():void;created(t
  async function submit(event:FormEvent<HTMLFormElement>){event.preventDefault();if(pending)return;const name=String(new FormData(event.currentTarget).get("name")??"").trim();setPending(true);setFailure(null);
  try{created(await client.request(`${CURRENT_API_PREFIX}/sunshine/devices`,isTicket,{method:"POST",body:JSON.stringify({name})}));}catch(error){setFailure({requestId:errorRequestId(error)})}finally{setPending(false)}}
  return <Dialog title={t("新建 Sunshine 实例", "Create Sunshine instance")} description={t("注册安装在 Sunshine 主机上的独立 客户端；不会安装 Sunshine 或改变串流链路。", "Register an independent agent on the Sunshine host. This does not install Sunshine or change the streaming connection.")} onClose={()=>{if(!pending)close()}}>
- <form onSubmit={event=>void submit(event)}>{failure&&<ErrorState requestId={failure.requestId}>{t("创建未能确认，请先刷新实例列表核对。", "Creation could not be confirmed. Refresh the instance list and check first.")}</ErrorState>}
+ <form onSubmit={event=>void submit(event)} aria-busy={pending}>{failure&&<ErrorState requestId={failure.requestId}>{t("创建未能确认，请先刷新实例列表核对。", "Creation could not be confirmed. Refresh the instance list and check first.")}</ErrorState>}
  <FormField label={t("实例名称", "Instance name")}><InstanceNameField name="name" required title={t("最多 32 个字符", "Up to 32 characters")} readOnly={pending} data-sarmg-initial-focus/></FormField><p>{t("最多 32 个字符。", "Up to 32 characters.")}</p>
  <div className="sarmg-actions"><Button disabled={pending} onClick={close}>{t("取消", "Cancel")}</Button><Button type="submit" disabled={pending}>{t("创建实例", "Create instance")}</Button></div></form></Dialog>;
 }
