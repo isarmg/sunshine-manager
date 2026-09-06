@@ -3006,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "sunshine-manager"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
