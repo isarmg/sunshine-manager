@@ -124,10 +124,8 @@ async fn exact_current_schema_is_durable_and_self_identifying() {
     );
 
     sqlx::query(
-        "INSERT INTO hosts(\
-           host_id,name,address,web_port,username,secret,position,\
-           created_at_micros,updated_at_micros\
-         ) VALUES('persistent','Persistent','192.0.2.1',47990,'sunshine',NULL,0,1,1)",
+        "INSERT INTO devices(device_id,name,created_at_micros,updated_at_micros) \
+         VALUES('11111111-1111-4111-8111-111111111111','Persistent',1,1)",
     )
     .execute(&pool)
     .await
@@ -137,10 +135,12 @@ async fn exact_current_schema_is_durable_and_self_identifying() {
     pool.close().await;
 
     let reopened = db::open_existing(&url).await.unwrap();
-    let name: String = sqlx::query_scalar("SELECT name FROM hosts WHERE host_id='persistent'")
-        .fetch_one(&reopened)
-        .await
-        .unwrap();
+    let name: String = sqlx::query_scalar(
+        "SELECT name FROM devices WHERE device_id='11111111-1111-4111-8111-111111111111'",
+    )
+    .fetch_one(&reopened)
+    .await
+    .unwrap();
     assert_eq!(name, "Persistent");
     assert!(db::ready(&reopened).await);
     reopened.close().await;

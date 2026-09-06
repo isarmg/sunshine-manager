@@ -1,8 +1,14 @@
 # Sunshine Manager
 
+Agent 管理改造正在实施：新增的 `agent/`、`protocol/` 已有独立执行内核和 WSS 客户端，但尚未替换当前 Manager 或形成可安装发行包。
+目标为 Windows/Linux x86_64 和 Sunshine 官方 v2026.516.143833；进度与未完成项见 [Agent 管理实施记录](docs/agent-management-v1.md)。
+
+管理 Web 支持实例创建、Sunshine 分类配置、应用管理、客户端配对、日志及远端服务操作。
+使用说明见 [实例创建](docs/instance-management.md) 和 [Sunshine 远端管理](docs/remote-management.md)。
+
 Sunshine Manager `0.8.0` 是独立的 Sunshine 主机管理服务。Server API 采用 sarmg-foundation-server 的
 持久管理员控制面，并提供主机凭据管理、应用/客户端控制和可恢复的异步远程操作；当前内置 Web 提供登录、会话
-恢复与 Host 只读概览。Server 使用 Rust/Axum 与 SQLite，内置 Web 使用 Foundation 精确基线的 React/Vite。
+恢复、实例连接设置及完整远端管理入口。Server 使用 Rust/Axum 与 SQLite，内置 Web 使用 Foundation 精确基线的 React/Vite。
 
 项目只接受唯一当前 `/api/v2`、`0.8.0` SQLite Schema、凭据 key ID 和不可变发行身份，不注册平行路径，
 不读取非当前数据库或其他 key。产品仓不实现迁移、备份和恢复；这些能力归 `sarmg-upgrade` 所有。

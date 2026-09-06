@@ -22,7 +22,7 @@
 | SUN-014 | Applications/Clients 集合最多 512 项并验证元素形状 | `MAX_ITEMS`、UUID 去重与布尔字段校验 | 保障 | 中 | 无界集合或重复客户端会拖垮 UI 并产生歧义操作 | 513 项、重复/空 UUID、非对象应用 |
 | SUN-015 | JSON/日志错误正文只做 4 MiB 有界读取后丢弃，cover 非成功正文不读取；API/日志均不保留内容 | `ensure_status`、`status_error`、`AppError::into_response` | 保障 | 低 | 远端正文可能泄露 Secret、Host 数据或用控制字符污染日志 | 401/403/5xx 含敏感标记，确认响应与捕获日志均不存在标记；API 只给稳定通用 message |
 | SUN-016 | 周期探测可达性与连接状态快照 | `probe_loop`、`health` map、HostInfo | 建议保留 | 中 | 管理员只能在执行动作后发现 Host 离线 | 500ms TCP 探测、删除清理、并发读取 |
-| SUN-017 | Application 列表读取 | `/apps` route、`UpstreamClient::apps_list` | 核心 | 中 | API 调用方无法看到 Sunshine 可启动应用；当前内置 Web 尚无应用页 | 正常/空/超限/异常响应 |
+| SUN-017 | Application 列表读取 | `/apps` route、`UpstreamClient::apps_list`、Web 应用管理 | 核心 | 中 | 无法看到 Sunshine 可启动应用 | 正常/空/超限/异常响应 |
 | SUN-018 | Application 顶层 JSON object（≤256 KiB）保存为 durable operation | `validate_object`、`AppsSave`、`/apps` POST | 核心 | 高 | 无法集中新增或修改 Sunshine 应用；逐字段语义当前委托给 Sunshine，而非 Manager 自建 Schema | 非 object/超限、幂等、成功/unknown |
 | SUN-019 | 关闭当前应用和按 index 删除应用 | `AppsClose`、`AppsDelete` | 可选 | 中 | 管理端仍能查看/保存应用，但不能结束会话或删除条目 | index 边界、响应丢失、审计 |
 | SUN-020 | Moonlight Client 列表 | `/clients`、`clients_list` | 核心 | 中 | 无法盘点已配对客户端和 enabled 状态 | UUID/布尔/重复/上限 |
@@ -34,7 +34,7 @@
 | SUN-026 | PIN/name 配对 | `Pin` operation、`/pin` | 建议保留 | 中 | 新 Moonlight 客户端必须直接操作 Sunshine | PIN/name 边界、串行、审计 |
 | SUN-027 | 远端 Sunshine restart | `Restart` operation | 可选 | 高 | 管理员需登录 Host 执行重启；保留时必须接受响应丢失的 unknown | 202、断线、禁止盲重试 |
 | SUN-028 | reset display persistence | `ResetDisplay` operation | 可选 | 高 | 显示设备持久状态需在 Host 本地修复 | 成功、远端拒绝、unknown |
-| SUN-029 | 读取当前应用封面并将未知 MIME 降级为 `application/octet-stream` | `/covers/{index}`、`UpstreamClient::cover`、`safe_cover_type` | 可选 | 中 | API 调用方无法预览 Sunshine 封面；当前内置 Web 尚无封面页 | index、8 MiB、已知 MIME 映射、未知 MIME 安全降级、认证 |
+| SUN-029 | 读取当前应用封面并将未知 MIME 降级为 `application/octet-stream` | `/covers/{index}`、`UpstreamClient::cover`、`safe_cover_type`、Web 按需封面预览 | 可选 | 中 | 无法预览 Sunshine 封面 | index、8 MiB、已知 MIME 映射、未知 MIME 安全降级、认证 |
 | SUN-030 | 外部封面安全下载并让 Sunshine 回取 | `CoverUpload`、cover policy/proxy | 可选 | 高 | 只能使用 Sunshine 现有封面或在 Host 本地上传 | 完整 SSRF、token、operation 流程 |
 | SUN-031 | Operation 七状态持久状态机 | `pending/running/succeeded/failed/unknown/dead_letter/resolved` | 核心 | 高 | 非事务远端调用会被错误简化为一次同步成败 | 每条允许/禁止转换与重启恢复 |
 | SUN-032 | 保存 mutation 意图与 requested outbox 同事务提交 | `OperationManager::enqueue`、`insert_outbox`、SQLite transaction | 保障 | 高 | 进程崩溃可能出现“执行了但无意图”或“有意图无审计” | 各 commit 故障点、原子性 |
@@ -119,7 +119,7 @@
 | 审计 | requested/completion 与 durable outbox | 不记录 Secret 或远端正文 |
 | 封面 | HTTPS allowlist、DNS 公网校验、pin、一次性代理 | 需要 Sunshine 主机可达内部 HTTPS origin |
 | 数据 | 当前 SQLite、字段密文、运行锁、doctor | 单数据库单活，不是集群数据库 |
-| Web | Foundation React/Vite 管理员登录、Session 和 Host 只读概览 | 当前不提供 Host CRUD、客户端、应用、operation 管理 UI，也不提供插件系统 |
+| Web | Foundation React/Vite 登录、Session、实例 CRUD、分类配置、应用、客户端、日志、服务操作及 operation 查询/人工核对 | 无插件系统；远端修改异步执行，硬件行为需真实 Sunshine 环境验收 |
 | 发布 | 固定目录、source-bound、全树 manifest | 同版本不覆盖，无 mutable alias |
 
 ## 2. 架构取舍

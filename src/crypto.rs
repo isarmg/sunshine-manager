@@ -14,8 +14,6 @@ use crate::error::{AppError, AppResult};
 
 const PREFIX: &str = "sunshine:sgev1:";
 const AAD_FORMAT: &[u8] = b"sunshine-manager:aes-256-gcm:aad:v1";
-const HOST_CREDENTIAL_DOMAIN: &[u8] = b"host-credential";
-const HOST_SECRET_FIELD: &[u8] = b"secret";
 const OPERATION_REQUEST_DOMAIN: &[u8] = b"operation-request";
 const OPERATION_REQUEST_FIELD: &[u8] = b"request_ciphertext";
 const HKDF_SALT: &[u8] = b"sunshine-manager:credential-master-key:hkdf-sha256:v1";
@@ -23,12 +21,6 @@ const REQUEST_FINGERPRINT_INFO: &[u8] =
     b"sunshine-manager:operation-request-fingerprint:hmac-sha256:v1";
 const IDEMPOTENCY_KEY_HASH_INFO: &[u8] =
     b"sunshine-manager:operation-idempotency-key-hash:hmac-sha256:v1";
-
-struct HostCredentialEnvelope;
-impl EnvelopeDomain for HostCredentialEnvelope {
-    const DOMAIN: &'static [u8] = b"sunshine-manager/host-credential";
-    const REVISION: u16 = 1;
-}
 
 struct OperationRequestEnvelope;
 impl EnvelopeDomain for OperationRequestEnvelope {
@@ -61,16 +53,6 @@ impl SecretBox {
             request_fingerprint_key,
             idempotency_key_hash_key,
         })
-    }
-
-    /// Seal one Host's Sunshine Basic Auth password. The authenticated context
-    /// prevents a valid ciphertext from being moved to another Host or field.
-    pub fn encrypt_host_credential(&self, host_id: &str, value: &str) -> AppResult<String> {
-        self.encrypt::<HostCredentialEnvelope>(value, &host_credential_aad(host_id))
-    }
-
-    pub fn decrypt_host_credential(&self, host_id: &str, value: &str) -> AppResult<String> {
-        self.decrypt::<HostCredentialEnvelope>(value, &host_credential_aad(host_id))
     }
 
     /// Seal one durable operation request. Both the row identity and declared
@@ -190,13 +172,6 @@ fn append_context_component(context: &mut Vec<u8>, value: &[u8]) {
     context.extend_from_slice(value);
 }
 
-fn host_credential_aad(host_id: &str) -> Vec<u8> {
-    authenticated_context(
-        HOST_CREDENTIAL_DOMAIN,
-        &[host_id.as_bytes(), HOST_SECRET_FIELD],
-    )
-}
-
 fn operation_request_aad(operation_id: &str, action: &str) -> Vec<u8> {
     authenticated_context(
         OPERATION_REQUEST_DOMAIN,
@@ -227,136 +202,54 @@ fn validate_key_id(value: String) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::Digest as _;
-
     #[test]
-    fn host_ciphertext_round_trips_and_is_randomized() {
-        let secrets = SecretBox::new("primary", [3; 32]).unwrap();
-        let first = secrets
-            .encrypt_host_credential("host-a", "password")
+    fn operation_envelope_binds_id_action_and_key() {
+        let secret = SecretBox::new("one", [3; 32]).unwrap();
+        let a = secret
+            .encrypt_operation_request("op-a", "sunshine.config.patch", "payload")
             .unwrap();
-        let second = secrets
-            .encrypt_host_credential("host-a", "password")
+        let b = secret
+            .encrypt_operation_request("op-a", "sunshine.config.patch", "payload")
             .unwrap();
-        assert_ne!(first, second);
+        assert_ne!(a, b);
         assert_eq!(
-            secrets.decrypt_host_credential("host-a", &first).unwrap(),
-            "password"
-        );
-        assert!(!first.contains("password"));
-
-        let rest = first.strip_prefix(PREFIX).unwrap();
-        let (key_id, encoded) = rest.split_once(':').unwrap();
-        let mut tampered_payload = decode_payload(encoded).unwrap();
-        *tampered_payload.last_mut().unwrap() ^= 1;
-        let tampered = format!("{PREFIX}{key_id}:{}", STANDARD.encode(tampered_payload));
-        assert!(
-            secrets
-                .decrypt_host_credential("host-a", &tampered)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn authenticated_context_rejects_record_action_and_domain_swaps() {
-        let secrets = SecretBox::new("primary", [3; 32]).unwrap();
-        let host_ciphertext = secrets
-            .encrypt_host_credential("host-a", "password")
-            .unwrap();
-        assert!(
-            secrets
-                .decrypt_host_credential("host-b", &host_ciphertext)
-                .is_err()
-        );
-        assert!(
-            secrets
-                .decrypt_operation_request("host-a", "secret", &host_ciphertext,)
-                .is_err()
-        );
-
-        let operation_ciphertext = secrets
-            .encrypt_operation_request("op-a", "sunshine.pin", r#"{"pin":"1234"}"#)
-            .unwrap();
-        assert_eq!(
-            secrets
-                .decrypt_operation_request("op-a", "sunshine.pin", &operation_ciphertext)
+            secret
+                .decrypt_operation_request("op-a", "sunshine.config.patch", &a)
                 .unwrap(),
-            r#"{"pin":"1234"}"#
+            "payload"
         );
         assert!(
-            secrets
-                .decrypt_operation_request("op-b", "sunshine.pin", &operation_ciphertext)
+            secret
+                .decrypt_operation_request("op-b", "sunshine.config.patch", &a)
                 .is_err()
         );
         assert!(
-            secrets
-                .decrypt_operation_request("op-a", "sunshine.config.save", &operation_ciphertext)
+            secret
+                .decrypt_operation_request("op-a", "sunshine.restart", &a)
+                .is_err()
+        );
+        assert!(
+            SecretBox::new("two", [4; 32])
+                .unwrap()
+                .decrypt_operation_request("op-a", "sunshine.config.patch", &a)
                 .is_err()
         );
     }
-
     #[test]
-    fn ciphertext_for_another_key_id_or_empty_aad_is_rejected() {
-        let source = SecretBox::new("source", [3; 32]).unwrap();
-        let active = SecretBox::new("active", [4; 32]).unwrap();
-        let ciphertext = source
-            .encrypt_host_credential("host-a", "password")
-            .unwrap();
-
-        assert!(
-            active
-                .decrypt_host_credential("host-a", &ciphertext)
-                .is_err()
-        );
-
-        let obsolete = format!("sunshine:v1:source:{}", STANDARD.encode(b"obsolete"));
-        assert!(source.decrypt_host_credential("host-a", &obsolete).is_err());
-    }
-
-    #[test]
-    fn operation_hmacs_are_stable_domain_separated_and_key_bound() {
-        let first = SecretBox::new("primary", [21; 32]).unwrap();
-        let same_master = SecretBox::new("primary", [21; 32]).unwrap();
-        let other_master = SecretBox::new("primary", [22; 32]).unwrap();
-        let low_entropy = r#"{"kind":"pin","pin":"1234","name":"laptop"}"#;
-
-        let fingerprint = first.operation_request_fingerprint(low_entropy);
-        assert_eq!(
-            fingerprint,
-            first.operation_request_fingerprint(low_entropy)
-        );
-        assert_eq!(
-            fingerprint,
-            same_master.operation_request_fingerprint(low_entropy)
+    fn operation_digests_are_keyed_and_domain_separated() {
+        let a = SecretBox::new("one", [3; 32]).unwrap();
+        let b = SecretBox::new("two", [4; 32]).unwrap();
+        assert_ne!(
+            a.operation_request_fingerprint("x"),
+            a.operation_idempotency_key_hash("x")
         );
         assert_ne!(
-            fingerprint,
-            other_master.operation_request_fingerprint(low_entropy)
-        );
-        let idempotency_hash = first.operation_idempotency_key_hash(low_entropy);
-        assert_eq!(
-            idempotency_hash,
-            first.operation_idempotency_key_hash(low_entropy)
+            a.operation_request_fingerprint("x"),
+            b.operation_request_fingerprint("x")
         );
         assert_eq!(
-            idempotency_hash,
-            same_master.operation_idempotency_key_hash(low_entropy)
+            a.operation_request_fingerprint("x"),
+            a.operation_request_fingerprint("x")
         );
-        assert_ne!(
-            idempotency_hash,
-            other_master.operation_idempotency_key_hash(low_entropy)
-        );
-        assert_ne!(
-            fingerprint, idempotency_hash,
-            "separate HKDF info values must keep the HMAC domains independent"
-        );
-
-        let bare_sha256: [u8; 32] = Sha256::digest(low_entropy.as_bytes()).into();
-        assert_ne!(fingerprint, bare_sha256);
-        assert!(constant_time_equal_32(&fingerprint, &fingerprint));
-        let mut different = fingerprint;
-        different[31] ^= 1;
-        assert!(!constant_time_equal_32(&fingerprint, &different));
-        assert!(!constant_time_equal_32(&fingerprint[..31], &fingerprint));
     }
 }

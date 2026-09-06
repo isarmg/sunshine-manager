@@ -1,0 +1,13 @@
+.sunshine-workspace { min-width: 0; }
+.sunshine-workspace code, .sunshine-wrap { overflow-wrap: anywhere; }
+.sunshine-field textarea { display: block; box-sizing: border-box; width: 100%; max-width: 100%; padding: 12px; border: 1px solid currentColor; border-radius: 12px; background: var(--sarmg-bg-panel); color: var(--sarmg-text-primary); font: inherit; resize: vertical; }
+.sunshine-field { display: grid; gap: 8px; margin-block: 16px; }
+.sunshine-checkbox { display: flex; align-items: center; gap: 8px; margin-block: 12px; }
+.sunshine-config-group { margin-block: 16px; }
+.sunshine-config-group summary { cursor: pointer; padding-block: 8px; }
+.sunshine-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
+.sunshine-items { display: grid; gap: 16px; margin-block: 16px; }
+.sunshine-item { border-block-end: 1px solid currentColor; padding-block-end: 12px; min-width: 0; }
+.sunshine-cover { max-width: 100%; max-height: 240px; object-fit: contain; }
+.sunshine-logs { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; }
+@media (max-width: 48rem) { .sunshine-fields { grid-template-columns: minmax(0, 1fr); } }

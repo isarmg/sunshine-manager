@@ -19,8 +19,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 pub const APPLICATION: &str = "sunshine-manager";
 pub const APPLICATION_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SCHEMA_REVISION: i64 = 4;
-pub const SCHEMA_SHA256: &str = "09c3fbedd7c8bb59fabec99ddaaf3492858afd21de867db4b7160093bb47f3e5";
+pub const SCHEMA_REVISION: i64 = 5;
+pub const SCHEMA_SHA256: &str = "f53804a38627f5be9f8be9e3a54e5ee8950faaa778037d48ccd72bb320733412";
 
 const CURRENT_SCHEMA_SQL: &str = include_str!("../schema/generated/current_schema.sql");
 
@@ -132,6 +132,10 @@ pub async fn initialize_empty(pool: &SqlitePool) -> anyhow::Result<()> {
         "database is not empty; upgrades require the external upgrade tool"
     );
     sqlx::raw_sql(CURRENT_SCHEMA_SQL)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("INSERT INTO manager_identity(singleton,manager_id) VALUES(1,?)")
+        .bind(uuid::Uuid::new_v4().to_string())
         .execute(&mut *transaction)
         .await?;
     let created_at_micros = i64::try_from(

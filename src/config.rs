@@ -7,7 +7,7 @@ use std::{
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use crate::{cover_policy::CoverUrlPolicy, cover_proxy::CoverProxy, crypto::SecretBox};
+use crate::crypto::SecretBox;
 
 #[derive(Clone)]
 pub struct ServeConfig {
@@ -15,8 +15,6 @@ pub struct ServeConfig {
     pub database_url: String,
     pub production: bool,
     pub secrets: SecretBox,
-    pub cover_url_policy: CoverUrlPolicy,
-    pub cover_proxy: CoverProxy,
     pub bootstrap_admin_username: String,
     pub bootstrap_admin_password: Option<String>,
     pub static_dir: PathBuf,
@@ -36,22 +34,10 @@ impl ServeConfig {
         let production = parse_bool("SUNSHINE_MANAGER_PRODUCTION", true)?;
         let static_dir =
             validate_static_dir(&required("SUNSHINE_MANAGER_STATIC_DIR")?, production)?;
-        if !production && !bind.ip().is_loopback() {
-            anyhow::bail!(
-                "development HTTP administrator sessions require a loopback bind address"
-            );
+        if !bind.ip().is_loopback() {
+            anyhow::bail!("Manager must bind loopback behind a trusted HTTPS/WSS ingress");
         }
 
-        let cover_url_policy =
-            CoverUrlPolicy::from_csv(&value("SUNSHINE_MANAGER_COVER_URL_ALLOWLIST", ""))?;
-        let cover_proxy = match env::var("SUNSHINE_MANAGER_COVER_PROXY_ORIGIN") {
-            Ok(origin) => CoverProxy::from_origin(&origin)?,
-            Err(env::VarError::NotPresent) if cover_url_policy.is_empty() => CoverProxy::disabled(),
-            Err(env::VarError::NotPresent) => anyhow::bail!(
-                "SUNSHINE_MANAGER_COVER_PROXY_ORIGIN is required when cover uploads are enabled"
-            ),
-            Err(error) => return Err(error.into()),
-        };
         let bootstrap_admin_username = sarmg_admin_auth::normalize_administrator_username(&value(
             "SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_USERNAME",
             "admin",
@@ -65,8 +51,6 @@ impl ServeConfig {
                 value("SUNSHINE_MANAGER_CREDENTIAL_KEY_ID", "primary"),
                 credential_key,
             )?,
-            cover_url_policy,
-            cover_proxy,
             bootstrap_admin_username,
             bootstrap_admin_password: env::var("SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD").ok(),
             static_dir,

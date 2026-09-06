@@ -1,40 +1,24 @@
-import { createSarmgAdminApplication, errorRequestId, useAdminApplication } from "@sarmg/admin-shell";
-import { Button, EmptyState, ErrorState, LoadingState, StatusBadge, Table } from "@sarmg/admin-ui";
-import { useEffect, useState } from "react";
-import { CURRENT_API_PREFIX, adminApi, isHostInfoArray, type HostInfo } from "./api";
-
-function HostsPage() {
-  const { client } = useAdminApplication();
-  const [hosts, setHosts] = useState<HostInfo[] | null>(null);
-  const [failure, setFailure] = useState<{ requestId?: string } | null>(null);
-  const [generation, setGeneration] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    setHosts(null); setFailure(null);
-    void client.request(`${CURRENT_API_PREFIX}/sunshine/hosts`, isHostInfoArray, { signal: controller.signal })
-      .then(received => { if (!controller.signal.aborted) setHosts(received); })
-      .catch(error => { if (!controller.signal.aborted) setFailure({ requestId: errorRequestId(error) }); });
-    return () => controller.abort();
-  }, [client, generation]);
-  const refresh = () => setGeneration(value => value + 1);
-  return <section id="hosts"><h1>Sunshine 主机</h1>
-    <Button onClick={refresh} disabled={hosts === null && failure === null}>刷新</Button>
-    {failure ? <ErrorState requestId={failure.requestId} onRetry={refresh}>无法加载主机列表</ErrorState>
-      : hosts === null ? <LoadingState>正在加载主机…</LoadingState>
-      : hosts.length === 0 ? <EmptyState>暂无主机</EmptyState>
-      : <Table aria-label="Sunshine 主机"><caption>主机状态</caption>
-        <thead><tr><th scope="col">名称</th><th scope="col">地址</th><th scope="col">连接</th></tr></thead>
-        <tbody>{hosts.map(host => <tr key={host.id}><th scope="row">{host.name}</th>
-          <td>{host.host}:{host.web_port}</td><td><StatusBadge status={
-            host.probe_status === "pending" ? "正在检测" : host.connected ? "已连接" : "未连接"
-          } /></td></tr>)}</tbody>
-      </Table>}
-  </section>;
+import {createSarmgAdminApplication,errorRequestId,useAdminApplication} from "../shell/index.js";
+import {Button,EmptyState,ErrorState,LoadingState} from "@sarmg/admin-ui";
+import {useEffect,useState} from "react";
+import {CURRENT_API_PREFIX,adminApi,isDevices,type DeviceInfo,type Ticket} from "./api";
+import {DeviceRegistrationDialog} from "./DeviceRegistrationDialog";
+import {AgentWorkspace} from "./AgentWorkspace";
+import {DeviceInstances} from "./DeviceInstances";
+import { HeaderNavigation, InstanceHeaderActions } from "../shell/index.js";
+const pages = [["instances","实例"],["status","设备状态"],["config","Sunshine 配置"],["tasks","任务记录"]] as const;
+function currentPage(){return pages.find(([id])=>id===window.location.hash.slice(1))?.[0]??"instances"}
+function DevicesPage(){
+ const{client}=useAdminApplication();const[devices,setDevices]=useState<DeviceInfo[]|null>(null);const[failure,setFailure]=useState<{requestId?:string}|null>(null);
+ const[generation,setGeneration]=useState(0);const[creating,setCreating]=useState(false);const[selected,setSelected]=useState<string|null>(null);const[ticket,setTicket]=useState<Ticket|null>(null);
+ const[page,setPage]=useState(currentPage);
+ useEffect(()=>{const changed=()=>setPage(currentPage());window.addEventListener("hashchange",changed);return()=>window.removeEventListener("hashchange",changed)},[]);
+ useEffect(()=>{const controller=new AbortController();let active=true;async function load(){try{const values=await client.request(CURRENT_API_PREFIX+"/sunshine/devices",isDevices,{signal:controller.signal});if(active){setDevices(values);setFailure(null)}}catch(error){if(active)setFailure({requestId:errorRequestId(error)})}}void load();const timer=setInterval(()=>void load(),5000);return()=>{active=false;controller.abort();clearInterval(timer)}},[client,generation]);
+ const refresh=()=>setGeneration(value=>value+1);const device=devices?.find(value=>value.id===selected)??devices?.[0];
+ return <section><InstanceHeaderActions create={()=>setCreating(true)} refresh={refresh}/><HeaderNavigation label="Sunshine 页面">{pages.map(([id,name])=><Button key={id} aria-pressed={page===id} onClick={()=>{window.location.hash=id}}>{name}</Button>)}</HeaderNavigation><h1 className="sarmg-visually-hidden">Sunshine 设备管理</h1>
+ {failure&&<ErrorState requestId={failure.requestId} onRetry={refresh}>无法加载设备列表</ErrorState>}
+ {page==="instances"?<section aria-label="Sunshine 实例"><h2>实例</h2>{devices===null?<LoadingState>正在加载设备…</LoadingState>:<DeviceInstances devices={devices} select={id=>{setSelected(id);window.location.hash="status"}}/>}</section>
+ :device?<><h2>{device.name}</h2><AgentWorkspace key={device.id} device={device} page={pages.find(([id])=>id===page)![1]} changed={refresh} ticket={ticket?.device.id===device.id?ticket:null}/></>:devices===null?<LoadingState>正在加载设备…</LoadingState>:<EmptyState>暂无实例，请新建并注册 Agent。</EmptyState>}
+ {creating&&<DeviceRegistrationDialog close={()=>setCreating(false)} created={value=>{setTicket(value);setSelected(value.device.id);setCreating(false);window.location.hash="status";refresh()}}/>}</section>
 }
-
-export default createSarmgAdminApplication({
-  product: { name: "Sunshine Manager", version: "0.8.0" },
-  client: adminApi,
-  navigation: [{ label: "主机", href: "#hosts" }],
-  routes: <HostsPage />,
-});
+export default createSarmgAdminApplication({product:{name:"Sunshine Manager"},client:adminApi,navigation:[],routes:<DevicesPage/>});

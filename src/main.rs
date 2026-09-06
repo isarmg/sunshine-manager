@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use sarmg_admin_core::AdministratorStore;
 use sunshine_manager::{
     ServeConfig, db,
-    http::{WorkerState, probe_loop, router},
+    http::{WorkerState, router},
     release_bundle, release_contract,
     runtime_lock::{ApplicationLock, MaintenanceLock},
 };
@@ -187,15 +187,13 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
     }
-    let state = WorkerState::new(pool, config.secrets, config.production, config.static_dir)?
-        .with_cover_delivery(config.cover_url_policy, config.cover_proxy);
+    let state = WorkerState::new(pool, config.secrets, config.production, config.static_dir)?;
     let recovered = state.operation_manager().recover_startup().await?;
     if let Err(error) = state.operation_manager().deliver_outbox().await {
         tracing::warn!(%error, "initial audit outbox delivery failed; background retry will continue");
     }
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let health_pool = state.pool.clone();
-    let probe_state = state.clone();
     let operation_manager = state.operation_manager().clone();
     let audit_pool = state.pool.clone();
     let operations_pool = state.pool.clone();
@@ -234,16 +232,6 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
                 let pool = health_pool.clone();
                 async move { db::ready(&pool).await }
             }),
-        )
-        .register_background_task(
-            "host-probe",
-            sarmg_server_runtime::TaskCriticality::Degrading,
-            move |mut shutdown| async move {
-                tokio::select! {
-                    _ = probe_loop(probe_state) => Ok(()),
-                    _ = shutdown.changed() => Ok(()),
-                }
-            },
         )
         .register_background_task(
             "durable-operations",

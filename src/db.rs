@@ -1,34 +1,268 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use sqlx::{Sqlite, SqlitePool, Transaction};
-
 use crate::{
-    crypto::{SecretBox, constant_time_equal_32},
+    crypto::SecretBox,
     error::{AppError, AppResult},
-    model::{Host, HostPatchRequest, HostSaveRequest, normalize_host, validate_host_request},
+    model::{DeviceView, validate_instance_name},
 };
-
+use rand::RngCore;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use sqlx::{Sqlite, SqlitePool, Transaction};
+use std::time::{SystemTime, UNIX_EPOCH};
+use sunshine_agent_protocol::{Binding, Capabilities, ConfigSnapshot};
+use uuid::Uuid;
 pub const SCHEMA: &str = "sunshine";
 pub use crate::database_schema::{initialize_empty, open_existing, open_or_initialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
-pub(crate) struct StoredHost {
-    pub host_id: String,
+#[derive(Clone, sqlx::FromRow)]
+pub struct Device {
+    pub device_id: String,
     pub name: String,
-    pub address: String,
-    pub web_port: i32,
-    pub username: String,
-    pub secret: Option<String>,
-    pub position: i64,
+    pub installation_id: Option<String>,
+    pub credential_hash: Option<Vec<u8>>,
+    pub enrollment_hash: Option<Vec<u8>>,
+    pub revoked_at_micros: Option<i64>,
+    pub session_id: Option<String>,
+    pub last_seen_at_micros: Option<i64>,
+    pub health_at_micros: Option<i64>,
+    pub sunshine_reachable: Option<bool>,
+    pub capabilities_json: Option<String>,
+    pub snapshot_json: Option<String>,
+    pub saved_revision: Option<String>,
+    pub configuration_state: String,
     pub created_at_micros: i64,
     pub updated_at_micros: i64,
 }
-
+impl Device {
+    pub fn view(&self, now: i64) -> DeviceView {
+        let online = self.revoked_at_micros.is_none()
+            && self.session_id.is_some()
+            && self
+                .last_seen_at_micros
+                .is_some_and(|seen| now.saturating_sub(seen) < 45_000_000);
+        let snapshot: Option<ConfigSnapshot> = self
+            .snapshot_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok());
+        let state = if self.saved_revision.as_ref().is_some_and(|saved| {
+            snapshot
+                .as_ref()
+                .is_some_and(|value| &value.revision != saved)
+        }) {
+            "drift_detected".to_owned()
+        } else {
+            self.configuration_state.clone()
+        };
+        DeviceView {
+            id: self.device_id.clone(),
+            name: self.name.clone(),
+            registered: self.installation_id.is_some(),
+            pairing_pending: self.enrollment_hash.is_some() && self.revoked_at_micros.is_none(),
+            revoked: self.revoked_at_micros.is_some(),
+            agent_online: online,
+            sunshine_reachable: if online
+                && self
+                    .health_at_micros
+                    .is_some_and(|seen| now.saturating_sub(seen) < 30_000_000)
+            {
+                self.sunshine_reachable
+            } else {
+                None
+            },
+            configuration_state: state,
+            snapshot,
+            capabilities: self
+                .capabilities_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Capabilities>(value).ok()),
+            last_seen_at_micros: self.last_seen_at_micros,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct EnrollmentTicket {
+    pub device: DeviceView,
+    pub manager_id: Uuid,
+    pub token: String,
+}
+pub async fn manager_id(pool: &SqlitePool) -> AppResult<Uuid> {
+    let id: String =
+        sqlx::query_scalar("SELECT manager_id FROM manager_identity WHERE singleton=1")
+            .fetch_one(pool)
+            .await?;
+    Uuid::parse_str(&id)
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid Manager identity")))
+}
+pub async fn get_device(pool: &SqlitePool, id: &str) -> AppResult<Device> {
+    sqlx::query_as("SELECT * FROM devices WHERE device_id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("设备不存在".into()))
+}
+pub async fn list_devices(pool: &SqlitePool) -> AppResult<Vec<DeviceView>> {
+    let now = now_micros()?;
+    Ok(
+        sqlx::query_as::<_, Device>("SELECT * FROM devices ORDER BY created_at_micros,device_id")
+            .fetch_all(pool)
+            .await?
+            .iter()
+            .map(|device| device.view(now))
+            .collect(),
+    )
+}
+pub async fn create_device(
+    pool: &SqlitePool,
+    name: &str,
+    actor: &str,
+) -> AppResult<EnrollmentTicket> {
+    validate_instance_name(name)?;
+    let id = Uuid::new_v4().to_string();
+    let now = now_micros()?;
+    let token = random_token();
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices")
+        .fetch_one(&mut *tx)
+        .await?;
+    if count >= 4096 {
+        return Err(AppError::Conflict("设备容量已满".into()));
+    }
+    sqlx::query("INSERT INTO devices(device_id,name,enrollment_hash,created_at_micros,updated_at_micros) VALUES(?,?,?,?,?)")
+        .bind(&id).bind(name).bind(token_hash(&token).as_slice()).bind(now).bind(now).execute(&mut *tx).await?;
+    audit(&mut tx, "device.create", &id, actor, None).await?;
+    tx.commit().await?;
+    Ok(EnrollmentTicket {
+        device: get_device(pool, &id).await?.view(now),
+        manager_id: manager_id(pool).await?,
+        token,
+    })
+}
+pub async fn cancel_pairing(pool: &SqlitePool, id: &str, actor: &str) -> AppResult<()> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let changed = sqlx::query("UPDATE devices SET enrollment_hash=NULL,updated_at_micros=? WHERE device_id=? AND installation_id IS NULL AND revoked_at_micros IS NULL AND enrollment_hash IS NOT NULL")
+        .bind(now_micros()?).bind(id).execute(&mut *tx).await?.rows_affected();
+    if changed != 1 {
+        return Err(AppError::Conflict("配对码已使用或已取消".into()));
+    }
+    audit(&mut tx, "device.pairing.cancel", id, actor, None).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub async fn rename(pool: &SqlitePool, id: &str, name: &str, actor: &str) -> AppResult<DeviceView> {
+    validate_instance_name(name)?;
+    let mut tx = pool.begin().await?;
+    if sqlx::query("UPDATE devices SET name=?,updated_at_micros=? WHERE device_id=?")
+        .bind(name)
+        .bind(now_micros()?)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        != 1
+    {
+        return Err(AppError::NotFound("设备不存在".into()));
+    }
+    audit(&mut tx, "device.rename", id, actor, None).await?;
+    tx.commit().await?;
+    Ok(get_device(pool, id).await?.view(now_micros()?))
+}
+pub async fn revoke(pool: &SqlitePool, id: &str, actor: &str) -> AppResult<()> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if sqlx::query("UPDATE devices SET revoked_at_micros=?,credential_hash=NULL,enrollment_hash=NULL,session_id=NULL,updated_at_micros=? WHERE device_id=?")
+        .bind(now_micros()?).bind(now_micros()?).bind(id).execute(&mut *tx).await?.rows_affected()!=1 { return Err(AppError::NotFound("设备不存在".into())); }
+    audit(&mut tx, "device.revoke", id, actor, None).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub async fn enroll(
+    pool: &SqlitePool,
+    id: &str,
+    installation: Uuid,
+    token: &str,
+    credential: &str,
+) -> AppResult<Binding> {
+    validate_token(token)?;
+    validate_token(credential)?;
+    if installation.is_nil() {
+        return Err(AppError::BadRequest("安装身份无效".into()));
+    }
+    let now = now_micros()?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let changed = sqlx::query("UPDATE devices SET installation_id=?,credential_hash=?,enrollment_hash=NULL,updated_at_micros=? WHERE device_id=? AND installation_id IS NULL AND revoked_at_micros IS NULL AND enrollment_hash=?")
+        .bind(installation.to_string()).bind(token_hash(credential).as_slice()).bind(now).bind(id).bind(token_hash(token).as_slice()).execute(&mut *tx).await?.rows_affected();
+    if changed != 1 {
+        return Err(AppError::Unauthorized);
+    }
+    audit(&mut tx, "device.enroll", id, "agent", None).await?;
+    tx.commit().await?;
+    Ok(Binding {
+        manager_id: manager_id(pool).await?,
+        device_id: Uuid::parse_str(id).map_err(|_| AppError::Unauthorized)?,
+        installation_id: installation,
+    })
+}
+pub async fn authenticate_device(pool: &SqlitePool, credential: &str) -> AppResult<Device> {
+    validate_token(credential).map_err(|_| AppError::Unauthorized)?;
+    sqlx::query_as("SELECT * FROM devices WHERE credential_hash=? AND revoked_at_micros IS NULL AND installation_id IS NOT NULL")
+        .bind(token_hash(credential).as_slice()).fetch_optional(pool).await?.ok_or(AppError::Unauthorized)
+}
+pub async fn binding(pool: &SqlitePool, device: &Device) -> AppResult<Binding> {
+    Ok(Binding {
+        manager_id: manager_id(pool).await?,
+        device_id: Uuid::parse_str(&device.device_id).map_err(|_| AppError::Unauthorized)?,
+        installation_id: device
+            .installation_id
+            .as_ref()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .ok_or_else(|| AppError::Conflict("设备尚未注册".into()))?,
+    })
+}
+pub fn random_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+pub fn token_hash(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
+pub fn validate_token(token: &str) -> AppResult<()> {
+    if token.len() != 64
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        Err(AppError::BadRequest("设备凭据格式无效".into()))
+    } else {
+        Ok(())
+    }
+}
+pub async fn audit(
+    tx: &mut Transaction<'_, Sqlite>,
+    action: &str,
+    target: &str,
+    actor: &str,
+    detail: Option<&str>,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO audit_logs(action,target,actor,detail,created_at_micros) VALUES(?,?,?,?,?)",
+    )
+    .bind(action)
+    .bind(target)
+    .bind(actor)
+    .bind(detail)
+    .bind(now_micros()?)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+pub fn now_micros() -> anyhow::Result<i64> {
+    Ok(i64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
+    )?)
+}
 pub async fn ready(pool: &SqlitePool) -> bool {
     crate::database_schema::is_current(pool).await
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Serialize)]
 pub struct DoctorReport {
     pub schema_ready: bool,
     pub integrity_ready: bool,
@@ -36,9 +270,8 @@ pub struct DoctorReport {
     pub writable: bool,
     pub encrypted_values_ready: bool,
 }
-
 impl DoctorReport {
-    pub const fn healthy(self) -> bool {
+    pub fn healthy(self) -> bool {
         self.schema_ready
             && self.integrity_ready
             && self.foreign_keys_ready
@@ -46,699 +279,45 @@ impl DoctorReport {
             && self.encrypted_values_ready
     }
 }
-
-/// Exercise the local durability and encryption boundary without retaining a
-/// probe row or contacting any configured Sunshine host.
 pub async fn doctor(pool: &SqlitePool, secrets: &SecretBox) -> DoctorReport {
-    let schema_ready = ready(pool).await;
-    let integrity_ready = sarmg_sqlite::integrity_check(pool).await.is_ok();
-    let foreign_keys_ready = sarmg_sqlite::foreign_key_check(pool).await.is_ok();
-    let writable = schema_ready && doctor_write_probe(pool).await.is_ok();
-    let encrypted_values_ready = schema_ready
-        && validate_encrypted_values(pool, secrets)
-            .await
-            .unwrap_or(false);
-
+    let writable = async {
+        let mut tx = pool.begin().await?;
+        audit(&mut tx, "doctor.write_probe", "doctor", "doctor", None).await?;
+        tx.rollback().await?;
+        Ok::<_, AppError>(())
+    }
+    .await
+    .is_ok();
     DoctorReport {
-        schema_ready,
-        integrity_ready,
-        foreign_keys_ready,
+        schema_ready: ready(pool).await,
+        integrity_ready: sarmg_sqlite::integrity_check(pool).await.is_ok(),
+        foreign_keys_ready: sarmg_sqlite::foreign_key_check(pool).await.is_ok(),
         writable,
-        encrypted_values_ready,
+        encrypted_values_ready: require_current_runtime_state(pool, secrets).await.is_ok(),
     }
 }
-
-async fn doctor_write_probe(pool: &SqlitePool) -> anyhow::Result<()> {
-    let target = format!("doctor:rollback:{}", uuid::Uuid::new_v4());
-    let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO audit_logs(action,target,detail,actor,created_at_micros) \
-         VALUES('doctor.write_probe',?,NULL,'doctor',?)",
-    )
-    .bind(&target)
-    .bind(now_micros()?)
-    .execute(&mut *transaction)
-    .await?;
-    transaction.rollback().await?;
-
-    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE target = ?")
-        .bind(target)
-        .fetch_one(pool)
-        .await?;
-    anyhow::ensure!(retained == 0, "doctor write probe was not rolled back");
-    Ok(())
-}
-
-async fn validate_encrypted_values(pool: &SqlitePool, secrets: &SecretBox) -> anyhow::Result<bool> {
-    let mut host_cursor = String::new();
-    loop {
-        let rows = sqlx::query_as::<_, StoredHost>(
-            r#"SELECT host_id,name,address,web_port,username,secret,position,
-                      created_at_micros,updated_at_micros
-               FROM hosts WHERE host_id > ? ORDER BY host_id LIMIT 128"#,
-        )
-        .bind(&host_cursor)
-        .fetch_all(pool)
-        .await?;
-        if rows.is_empty() {
-            break;
-        }
-        for row in &rows {
-            let Ok(host) = decode_host(row.clone(), secrets) else {
-                return Ok(false);
-            };
-            let request = HostSaveRequest {
-                name: host.name.clone(),
-                host: host.host.clone(),
-                web_port: host.web_port,
-                username: host.username.clone(),
-                password: Some(host.password),
-            };
-            if host.name != host.name.trim()
-                || host.host != normalize_host(&host.host)
-                || host.username != host.username.trim()
-                || validate_host_request(&request).is_err()
-            {
-                return Ok(false);
-            }
-        }
-        host_cursor = rows.last().expect("non-empty batch").host_id.clone();
-    }
-
-    let mut operation_cursor = String::new();
-    loop {
-        let rows = sqlx::query_as::<_, (String, String, Vec<u8>, Vec<u8>)>(
-            "SELECT operation_id,action,request_fingerprint,request_payload FROM _sarmg_operations \
-             WHERE operation_id > ? ORDER BY operation_id LIMIT 128",
-        )
-        .bind(&operation_cursor)
-        .fetch_all(pool)
-        .await?;
-        if rows.is_empty() {
-            break;
-        }
-        for (operation_id, action, fingerprint, payload) in &rows {
-            let Ok(payload) = serde_json::from_slice::<serde_json::Value>(payload) else {
-                return Ok(false);
-            };
-            let Some(ciphertext) = payload
-                .get("request_ciphertext")
-                .and_then(|value| value.as_str())
-            else {
-                return Ok(false);
-            };
-            let Ok(plaintext) = secrets.decrypt_operation_request(operation_id, action, ciphertext)
-            else {
-                return Ok(false);
-            };
-            let expected_fingerprint = secrets.operation_request_fingerprint(&plaintext);
-            if !constant_time_equal_32(fingerprint, &expected_fingerprint) {
-                return Ok(false);
-            }
-            let Ok(request) =
-                serde_json::from_str::<crate::operations::RemoteOperationRequest>(&plaintext)
-            else {
-                return Ok(false);
-            };
-            if request.action() != action.as_str() {
-                return Ok(false);
-            }
-        }
-        operation_cursor = rows.last().expect("non-empty batch").0.clone();
-    }
-    Ok(true)
-}
-
-/// Require the complete current runtime state before the network listener is
-/// opened. Schema identity alone cannot prove that SQLite pages, foreign-key
-/// relationships, or every persisted authenticated ciphertext are usable with
-/// the one configured credential key.
 pub async fn require_current_runtime_state(
     pool: &SqlitePool,
     secrets: &SecretBox,
 ) -> anyhow::Result<()> {
     sarmg_sqlite::integrity_check(pool).await?;
     sarmg_sqlite::foreign_key_check(pool).await?;
-    anyhow::ensure!(
-        validate_encrypted_values(pool, secrets).await?,
-        "persisted ciphertext or its record context is not valid under the current credential key"
-    );
+    manager_id(pool).await?;
+    let store = sarmg_operations::SqliteOperationStore::new(pool.clone());
+    let mut cursor = String::new();
+    loop {
+        let ids:Vec<String>=sqlx::query_scalar("SELECT operation_id FROM _sarmg_operations WHERE operation_id>? ORDER BY operation_id LIMIT 128").bind(&cursor).fetch_all(pool).await?;
+        if ids.is_empty() {
+            break;
+        }
+        for id in &ids {
+            let stored = store
+                .get(id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("operation disappeared"))?;
+            crate::operations::decode_task(secrets, &stored)?;
+        }
+        cursor = ids.last().expect("non-empty batch").clone();
+    }
     Ok(())
-}
-
-pub async fn list_hosts(pool: &SqlitePool, secrets: &SecretBox) -> AppResult<Vec<Host>> {
-    let rows = sqlx::query_as::<_, StoredHost>(
-        r#"SELECT host_id,name,address,web_port,username,secret,position,
-                  created_at_micros,updated_at_micros
-           FROM hosts
-           ORDER BY position,created_at_micros,host_id"#,
-    )
-    .fetch_all(pool)
-    .await?;
-    rows.into_iter()
-        .map(|row| decode_host(row, secrets))
-        .collect()
-}
-
-pub async fn get_host(pool: &SqlitePool, secrets: &SecretBox, id: &str) -> AppResult<Host> {
-    let row = get_stored_host(pool, id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Sunshine host '{id}' does not exist")))?;
-    decode_host(row, secrets)
-}
-
-pub async fn insert_host(
-    pool: &SqlitePool,
-    secrets: &SecretBox,
-    request: HostSaveRequest,
-    actor: &str,
-) -> AppResult<Host> {
-    validate_host_request(&request)?;
-    let now = now_micros()?;
-    let mut transaction = pool.begin().await?;
-    let position: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM hosts")
-        .fetch_one(&mut *transaction)
-        .await?;
-    let host = Host {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: request.name.trim().to_string(),
-        host: normalize_host(&request.host),
-        web_port: request.web_port,
-        username: request.username.trim().to_string(),
-        password: request.password.unwrap_or_default(),
-        position,
-        created_at_micros: now,
-        updated_at_micros: now,
-    };
-    let stored = encode_host(&host, secrets)?;
-    insert_stored(&mut transaction, &stored).await?;
-    insert_audit(
-        &mut transaction,
-        "host.create",
-        &host.id,
-        actor,
-        Some(&format!(
-            "name={} host={} port={}",
-            host.name, host.host, host.web_port
-        )),
-    )
-    .await?;
-    transaction.commit().await?;
-    Ok(host)
-}
-
-pub async fn update_host(
-    pool: &SqlitePool,
-    secrets: &SecretBox,
-    id: &str,
-    patch: HostPatchRequest,
-    actor: &str,
-) -> AppResult<Host> {
-    if patch.is_empty() {
-        return Err(AppError::BadRequest(
-            "at least one host field must be provided".to_string(),
-        ));
-    }
-    let update_password = patch.password.is_some();
-    let mut transaction = pool.begin().await?;
-    let row = get_stored_host_for_update(&mut transaction, id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Sunshine host '{id}' does not exist")))?;
-    let mut host = decode_host(row.clone(), secrets)?;
-    if let Some(value) = patch.name {
-        host.name = value.trim().to_string();
-    }
-    if let Some(value) = patch.host {
-        host.host = normalize_host(&value);
-    }
-    if let Some(value) = patch.web_port {
-        host.web_port = value;
-    }
-    if let Some(value) = patch.username {
-        host.username = value.trim().to_string();
-    }
-    if let Some(value) = patch.password {
-        host.password = value;
-    }
-    validate_host_request(&HostSaveRequest {
-        name: host.name.clone(),
-        host: host.host.clone(),
-        web_port: host.web_port,
-        username: host.username.clone(),
-        password: update_password.then(|| host.password.clone()),
-    })?;
-    host.updated_at_micros = now_micros()?;
-    let mut stored = encode_host(&host, secrets)?;
-    if !update_password {
-        stored.secret = row.secret;
-    }
-    update_stored(&mut transaction, &stored).await?;
-    insert_audit(
-        &mut transaction,
-        "host.update",
-        &host.id,
-        actor,
-        Some(&format!(
-            "name={} host={} port={}",
-            host.name, host.host, host.web_port
-        )),
-    )
-    .await?;
-    transaction.commit().await?;
-    Ok(host)
-}
-
-pub async fn delete_host(pool: &SqlitePool, id: &str, actor: &str) -> AppResult<()> {
-    let mut transaction = pool.begin().await?;
-    let result = sqlx::query("DELETE FROM hosts WHERE host_id=?")
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound(format!(
-            "Sunshine host '{id}' does not exist"
-        )));
-    }
-    insert_audit(
-        &mut transaction,
-        "host.delete",
-        id,
-        actor,
-        Some("host removed"),
-    )
-    .await?;
-    transaction.commit().await?;
-    Ok(())
-}
-
-pub(crate) async fn get_stored_host(
-    pool: &SqlitePool,
-    id: &str,
-) -> Result<Option<StoredHost>, sqlx::Error> {
-    sqlx::query_as::<_, StoredHost>(
-        r#"SELECT host_id,name,address,web_port,username,secret,position,
-                  created_at_micros,updated_at_micros
-           FROM hosts WHERE host_id=?"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-}
-
-pub(crate) async fn get_stored_host_for_update(
-    transaction: &mut Transaction<'_, Sqlite>,
-    id: &str,
-) -> Result<Option<StoredHost>, sqlx::Error> {
-    sqlx::query_as::<_, StoredHost>(
-        r#"SELECT host_id,name,address,web_port,username,secret,position,
-                  created_at_micros,updated_at_micros
-           FROM hosts WHERE host_id=?"#,
-    )
-    .bind(id)
-    .fetch_optional(&mut **transaction)
-    .await
-}
-
-pub(crate) async fn insert_stored(
-    transaction: &mut Transaction<'_, Sqlite>,
-    row: &StoredHost,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"INSERT INTO hosts(
-               host_id,name,address,web_port,username,secret,position,
-               created_at_micros,updated_at_micros)
-           VALUES(?,?,?,?,?,?,?,?,?)"#,
-    )
-    .bind(&row.host_id)
-    .bind(&row.name)
-    .bind(&row.address)
-    .bind(row.web_port)
-    .bind(&row.username)
-    .bind(&row.secret)
-    .bind(row.position)
-    .bind(row.created_at_micros)
-    .bind(row.updated_at_micros)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
-pub(crate) async fn update_stored(
-    transaction: &mut Transaction<'_, Sqlite>,
-    row: &StoredHost,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"UPDATE hosts SET name=?,address=?,web_port=?,username=?,
-             secret=?,position=?,updated_at_micros=?
-           WHERE host_id=?"#,
-    )
-    .bind(&row.name)
-    .bind(&row.address)
-    .bind(row.web_port)
-    .bind(&row.username)
-    .bind(&row.secret)
-    .bind(row.position)
-    .bind(row.updated_at_micros)
-    .bind(&row.host_id)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
-pub(crate) async fn insert_audit(
-    transaction: &mut Transaction<'_, Sqlite>,
-    action: &str,
-    target: &str,
-    actor: &str,
-    detail: Option<&str>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO audit_logs(action,target,detail,actor,created_at_micros) VALUES(?,?,?,?,?)",
-    )
-    .bind(action)
-    .bind(target)
-    .bind(detail)
-    .bind(actor)
-    .bind(now_micros().unwrap_or(0))
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
-pub(crate) fn encode_host(host: &Host, secrets: &SecretBox) -> AppResult<StoredHost> {
-    Ok(StoredHost {
-        host_id: host.id.clone(),
-        name: host.name.clone(),
-        address: host.host.clone(),
-        web_port: i32::from(host.web_port),
-        username: host.username.clone(),
-        secret: (!host.password.is_empty())
-            .then(|| secrets.encrypt_host_credential(&host.id, &host.password))
-            .transpose()?,
-        position: host.position,
-        created_at_micros: host.created_at_micros,
-        updated_at_micros: host.updated_at_micros,
-    })
-}
-
-pub(crate) fn decode_host(row: StoredHost, secrets: &SecretBox) -> AppResult<Host> {
-    let password = row
-        .secret
-        .as_deref()
-        .map(|value| secrets.decrypt_host_credential(&row.host_id, value))
-        .transpose()?
-        .unwrap_or_default();
-    Ok(Host {
-        id: row.host_id,
-        name: row.name,
-        host: row.address,
-        web_port: u16::try_from(row.web_port)
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid stored web_port")))?,
-        username: row.username,
-        password,
-        position: row.position,
-        created_at_micros: row.created_at_micros,
-        updated_at_micros: row.updated_at_micros,
-    })
-}
-
-pub(crate) fn now_micros() -> anyhow::Result<i64> {
-    let micros = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
-    i64::try_from(micros).map_err(Into::into)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    async fn current_pool() -> SqlitePool {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        initialize_empty(&pool).await.unwrap();
-        pool
-    }
-
-    #[tokio::test]
-    async fn host_crud_matches_the_sqlite_schema() {
-        let pool = current_pool().await;
-        let secrets = SecretBox::new("test", [7; 32]).unwrap();
-
-        let created = insert_host(
-            &pool,
-            &secrets,
-            HostSaveRequest {
-                name: "Desktop".into(),
-                host: "192.0.2.10".into(),
-                web_port: 47_990,
-                username: "sunshine".into(),
-                password: Some("initial-secret".into()),
-            },
-            "test-user",
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(created.name, "Desktop");
-        assert_eq!(created.host, "192.0.2.10");
-        assert_eq!(created.password, "initial-secret");
-        assert_eq!(
-            list_hosts(&pool, &secrets).await.unwrap(),
-            vec![created.clone()]
-        );
-
-        let updated = update_host(
-            &pool,
-            &secrets,
-            &created.id,
-            HostPatchRequest {
-                name: Some("Living Room".into()),
-                host: Some("192.0.2.20".into()),
-                web_port: Some(48_000),
-                // This is the upstream Sunshine Basic Auth username, not a
-                // Sunshine Manager role or administrator identity.
-                username: Some("operator".into()),
-                password: Some("rotated-secret".into()),
-            },
-            "test-user",
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(updated.id, created.id);
-        assert_eq!(updated.name, "Living Room");
-        assert_eq!(updated.host, "192.0.2.20");
-        assert_eq!(updated.web_port, 48_000);
-        assert_eq!(updated.username, "operator");
-        assert_eq!(updated.password, "rotated-secret");
-        assert_eq!(updated.created_at_micros, created.created_at_micros);
-        assert_eq!(
-            get_host(&pool, &secrets, &created.id).await.unwrap(),
-            updated
-        );
-
-        let stored_secret: String = sqlx::query_scalar("SELECT secret FROM hosts WHERE host_id=?")
-            .bind(&created.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_ne!(stored_secret, "rotated-secret");
-
-        let audit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(audit_count, 2);
-
-        delete_host(&pool, &created.id, "test-user").await.unwrap();
-        assert!(matches!(
-            get_host(&pool, &secrets, &created.id).await,
-            Err(AppError::NotFound(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn readiness_requires_the_operation_and_outbox_schema() {
-        let pool = current_pool().await;
-        assert!(ready(&pool).await);
-        sqlx::query("DROP TABLE _sarmg_operation_audit_outbox")
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(!ready(&pool).await);
-    }
-
-    #[tokio::test]
-    async fn doctor_checks_writes_and_encryption_without_retaining_probe_rows() {
-        let pool = current_pool().await;
-        let secrets = SecretBox::new("doctor", [17; 32]).unwrap();
-        insert_host(
-            &pool,
-            &secrets,
-            HostSaveRequest {
-                name: "Doctor Host".into(),
-                host: "192.0.2.90".into(),
-                web_port: 47_990,
-                username: "sunshine".into(),
-                password: Some("doctor-secret".into()),
-            },
-            "test-user",
-        )
-        .await
-        .unwrap();
-        let audit_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-        let report = doctor(&pool, &secrets).await;
-        assert!(report.healthy(), "{report:?}");
-        require_current_runtime_state(&pool, &secrets)
-            .await
-            .unwrap();
-        let audit_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(audit_after, audit_before);
-
-        let wrong_key = SecretBox::new("doctor", [18; 32]).unwrap();
-        let report = doctor(&pool, &wrong_key).await;
-        assert!(!report.healthy());
-        assert!(!report.encrypted_values_ready);
-        assert!(report.schema_ready && report.integrity_ready && report.foreign_keys_ready);
-        assert!(report.writable);
-        assert!(
-            require_current_runtime_state(&pool, &wrong_key)
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn startup_rejects_host_ciphertext_moved_to_another_record() {
-        let pool = current_pool().await;
-        let secrets = SecretBox::new("doctor", [19; 32]).unwrap();
-        let first = insert_host(
-            &pool,
-            &secrets,
-            HostSaveRequest {
-                name: "First Host".into(),
-                host: "192.0.2.91".into(),
-                web_port: 47_990,
-                username: "sunshine".into(),
-                password: Some("first-secret".into()),
-            },
-            "test-user",
-        )
-        .await
-        .unwrap();
-        let second = insert_host(
-            &pool,
-            &secrets,
-            HostSaveRequest {
-                name: "Second Host".into(),
-                host: "192.0.2.92".into(),
-                web_port: 47_990,
-                username: "sunshine".into(),
-                password: Some("second-secret".into()),
-            },
-            "test-user",
-        )
-        .await
-        .unwrap();
-        let first_ciphertext: String =
-            sqlx::query_scalar("SELECT secret FROM hosts WHERE host_id=?")
-                .bind(&first.id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        sqlx::query("UPDATE hosts SET secret=? WHERE host_id=?")
-            .bind(first_ciphertext)
-            .bind(&second.id)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            get_host(&pool, &secrets, &second.id).await,
-            Err(AppError::Crypto)
-        ));
-        assert!(!doctor(&pool, &secrets).await.encrypted_values_ready);
-        assert!(
-            require_current_runtime_state(&pool, &secrets)
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn production_pool_is_durable_and_enforces_sqlite_safety_pragmas() {
-        let directory = tempfile::tempdir().unwrap();
-        let database_path = directory.path().join("sunshine.sqlite3");
-        let database_url = format!("sqlite://{}", database_path.display());
-        let secrets = SecretBox::new("test", [9; 32]).unwrap();
-
-        let pool = open_or_initialize(&database_url).await.unwrap();
-
-        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-        assert_eq!(foreign_keys, 1);
-        assert_eq!(journal_mode, "wal");
-        assert_eq!(busy_timeout, 5_000);
-        assert_eq!(synchronous, 2);
-
-        let created = insert_host(
-            &pool,
-            &secrets,
-            HostSaveRequest {
-                name: "Persistent".into(),
-                host: "192.0.2.30".into(),
-                web_port: 47_990,
-                username: "sunshine".into(),
-                password: Some("persistent-secret".into()),
-            },
-            "test-user",
-        )
-        .await
-        .unwrap();
-        pool.close().await;
-
-        let reopened = open_existing(&database_url).await.unwrap();
-        assert_eq!(
-            get_host(&reopened, &secrets, &created.id).await.unwrap(),
-            created
-        );
-        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
-            .fetch_one(&reopened)
-            .await
-            .unwrap();
-        assert_eq!(integrity, "ok");
-        assert!(
-            sqlx::query("PRAGMA foreign_key_check")
-                .fetch_all(&reopened)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
 }

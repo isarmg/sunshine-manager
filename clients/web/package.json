@@ -1,7 +1,7 @@
 {
   "name": "sunshine-manager-web",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.9.0",
   "type": "module",
   "engines": {
     "node": ">=26.7.0 <27"
@@ -10,12 +10,13 @@
     "dev": "vite",
     "check:foundation": "node scripts/check-foundation-toolchain.mjs",
     "build": "npm run check:foundation && tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:browser": "npm run build && node tests/browser-acceptance.mjs && node tests/remote-controls.mjs"
   },
   "dependencies": {
-    "@sarmg/admin-web": "https://github.com/isarmg/sarmg-foundation-server/releases/download/v0.6.0/sarmg-admin-web-0.6.0.tgz",
     "@sarmg/admin-shell": "https://github.com/isarmg/sarmg-foundation-server/releases/download/v0.6.0/sarmg-admin-shell-0.6.0.tgz",
     "@sarmg/admin-ui": "https://github.com/isarmg/sarmg-foundation-server/releases/download/v0.6.0/sarmg-admin-ui-0.6.0.tgz",
+    "@sarmg/admin-web": "https://github.com/isarmg/sarmg-foundation-server/releases/download/v0.6.0/sarmg-admin-web-0.6.0.tgz",
     "@sarmg/contracts": "https://github.com/isarmg/sarmg-foundation-server/releases/download/v0.6.0/sarmg-contracts-0.6.0.tgz",
     "@sarmg/design-tokens": "https://github.com/isarmg/sarmg-foundation-server/releases/download/v0.6.0/sarmg-design-tokens-0.6.0.tgz",
     "@sarmg/http-client": "https://github.com/isarmg/sarmg-foundation-server/releases/download/v0.6.0/sarmg-http-client-0.6.0.tgz",
@@ -25,6 +26,8 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.61.1",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "4.7.0",

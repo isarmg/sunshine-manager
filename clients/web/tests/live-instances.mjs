@@ -1,0 +1,63 @@
+import assert from "node:assert/strict";
+import { chromium, expect } from "@playwright/test";
+import { randomBytes } from "node:crypto";
+import { withLocalServer } from "./local-server.mjs";
+
+await withLocalServer({ prefix: "SUNSHINE_MANAGER", binary: "../../target/debug/sunshine-manager",
+  extraEnv: { SUNSHINE_MANAGER_PRODUCTION: "false", SUNSHINE_MANAGER_CREDENTIAL_KEY: randomBytes(32).toString("base64"), SUNSHINE_MANAGER_CREDENTIAL_KEY_ID: "test" } }, async ({ base, password }) => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage(); const errors = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.goto(base);
+    await page.getByLabel("Username", { exact: true }).fill("admin");
+    await page.getByLabel("Password", { exact: true }).fill(password);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page.getByRole("button", { name: "新建实例", exact: true }).click();
+    await page.getByLabel("实例名称", { exact: true }).fill("真实后端 Sunshine 测试");
+    await page.getByLabel("主机地址", { exact: true }).fill("127.0.0.1");
+    await page.getByLabel("Web 端口", { exact: true }).fill("9");
+    await page.getByLabel("Sunshine 用户名", { exact: true }).fill("test");
+    await page.getByLabel("Sunshine 密码", { exact: true }).fill("never-display-this-secret");
+    const response = page.waitForResponse(response => response.url().endsWith("/sunshine/hosts") && response.request().method() === "POST");
+    await page.getByRole("button", { name: "创建实例", exact: true }).click();
+    const created = await response;
+    assert.equal(created.status(), 201);
+    assert.ok(!(await created.text()).includes("never-display-this-secret"));
+    await expect(page.getByRole("button", { name: "选择实例 真实后端 Sunshine 测试", exact: true })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("button", { name: "选择实例 真实后端 Sunshine 测试", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "新建实例", exact: true }).click();
+    const second = page.getByRole("dialog", { name: "新建 Sunshine 实例" });
+    await second.getByLabel("实例名称", { exact: true }).fill("第二个 Sunshine");
+    await second.getByLabel("主机地址", { exact: true }).fill("127.0.0.2");
+    await second.getByLabel("Sunshine 用户名", { exact: true }).fill("second");
+    await second.getByRole("button", { name: "创建实例", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "第二个 Sunshine", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "选择实例 真实后端 Sunshine 测试", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "真实后端 Sunshine 测试", exact: true })).toBeVisible();
+    const left = await page.getByRole("complementary", { name: "Sunshine 实例" }).boundingBox();
+    const right = await page.getByRole("region", { name: "实例详情与设置" }).boundingBox();
+    assert.ok(left.x + left.width < right.x);
+    await page.getByLabel("实例名称", { exact: true }).fill("已修改 Sunshine");
+    const saved = page.waitForResponse(response => response.request().method() === "PATCH");
+    await page.getByRole("button", { name: "保存设置", exact: true }).click();
+    const patch = await saved;
+    assert.equal(patch.status(), 200);
+    assert.ok(!Object.hasOwn(patch.request().postDataJSON(), "password"));
+    await expect(page.getByRole("button", { name: "选择实例 已修改 Sunshine", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "选择实例 第二个 Sunshine", exact: true }).click();
+    await expect(page.getByLabel("Sunshine 用户名", { exact: true })).toHaveValue("second");
+    await page.getByRole("button", { name: "删除实例", exact: true }).click();
+    await page.getByRole("button", { name: "Confirm", exact: true }).click();
+    await expect(page.getByRole("button", { name: "选择实例 第二个 Sunshine", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "切换到深色模式", exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await page.getByRole("button", { name: "切换到浅色模式", exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await page.screenshot({ path: "/tmp/sunshine-instance-workspace.png", fullPage: true });
+    await expect(page.locator("body")).not.toContainText("never-display-this-secret");
+    assert.deepEqual(errors, []);
+    console.log("Real Sunshine backend: create/select/two-column layout/save-without-password-change/delete/theme toggle passed");
+  } finally { await browser.close(); }
+});

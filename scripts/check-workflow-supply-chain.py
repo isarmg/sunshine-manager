@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 FIXED_RUNNER = "ubuntu-24.04"
+AGENT_WINDOWS_RUNNER = "windows-2025"
 MAX_TIMEOUT_MINUTES = 30
 MAX_WORKFLOW_BYTES = 1024 * 1024
 PINNED_OFFICIAL_ACTIONS = {
@@ -131,11 +132,17 @@ def matching_job_property(segment: list[Line], pattern: re.Pattern[str]) -> list
 
 def validate_job(source: str, header: Line, segment: list[Line]) -> None:
     runners = matching_job_property(segment, RUNNER_KEY)
-    if len(runners) != 1 or runners[0].content != f"runs-on: {FIXED_RUNNER}":
+    # Only this product Agent validation job may use Windows. Server/release jobs remain Linux-only.
+    expected_runner = (
+        AGENT_WINDOWS_RUNNER
+        if source == ".github/workflows/ci.yml" and header.content == "agent-windows-core:"
+        else FIXED_RUNNER
+    )
+    if len(runners) != 1 or runners[0].content != f"runs-on: {expected_runner}":
         raise fail(
             source,
             runners[0] if runners else header,
-            f"every job must use the fixed runner runs-on: {FIXED_RUNNER}",
+            f"this job must use the fixed runner runs-on: {expected_runner}",
         )
 
     timeouts = matching_job_property(segment, TIMEOUT_KEY)
@@ -336,11 +343,16 @@ jobs:
           persist-credentials: false
 """
     validate_workflow("positive-fixture.yml", base)
+    windows_agent = base.replace("  test:", "  agent-windows-core:").replace(
+        FIXED_RUNNER, AGENT_WINDOWS_RUNNER
+    )
+    validate_workflow(".github/workflows/ci.yml", windows_agent)
     cases = {
         "floating action": base.replace(
             PINNED_OFFICIAL_ACTIONS["actions/checkout"], "v4"
         ),
         "floating runner": base.replace(FIXED_RUNNER, "ubuntu-latest"),
+        "Windows Server runner": base.replace(FIXED_RUNNER, AGENT_WINDOWS_RUNNER),
         "over-broad permissions": base.replace("contents: read", "contents: write"),
         "persisted checkout credentials": base.replace(
             "persist-credentials: false", "persist-credentials: true"
@@ -352,6 +364,15 @@ jobs:
         except PolicyError:
             continue
         raise PolicyError(f"negative self-test unexpectedly accepted {label}")
+    for fixture in [
+        windows_agent.replace(AGENT_WINDOWS_RUNNER, "windows-latest"),
+        windows_agent.replace("agent-windows-core:", "server:"),
+    ]:
+        try:
+            validate_workflow(".github/workflows/ci.yml", fixture)
+        except PolicyError:
+            continue
+        raise PolicyError("negative self-test accepted a floating Windows runner or Windows Server job")
     print(
         "workflow policy negative tests: passed "
         "floating action/runner/permissions and checkout credentials"
