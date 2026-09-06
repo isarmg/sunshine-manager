@@ -166,6 +166,9 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
             "SUNSHINE_MANAGER_STATIC_DIR must belong to the verified release"
         );
     }
+    let signals = sarmg_server_runtime::ProcessSignals::install()?;
+    let listeners = sarmg_server_runtime::BoundListeners::bind([config.bind])?;
+    let transport = sarmg_server_runtime::HttpServer::new(listeners, signals);
     // Hold both locks for the complete process lifetime. The instance lock
     // rejects a second worker, while the shared maintenance lock excludes
     // external restore, upgrade, and administrator maintenance.
@@ -192,7 +195,6 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
     if let Err(error) = state.operation_manager().deliver_outbox().await {
         tracing::warn!(%error, "initial audit outbox delivery failed; background retry will continue");
     }
-    let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let health_pool = state.pool.clone();
     let operation_manager = state.operation_manager().clone();
     let audit_pool = state.pool.clone();
@@ -201,7 +203,7 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
         sarmg_server_runtime::ServerRuntime::builder(sarmg_server_runtime::ProductDescriptor {
             id: "sunshine-manager".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            foundation_revision: "1e889d08fa69fcf2b5fffe45e8cc42b68218f4f1".to_owned(),
+            foundation_revision: "77e7ad7af8e1bf62432bd6bdd8fa9aff54cb39d1".to_owned(),
             profile: "server-control-plane".to_owned(),
             capabilities: vec![
                 "admin-persistent".to_owned(),
@@ -248,7 +250,7 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
         "Sunshine manager ready"
     );
     runtime
-        .serve(listener, router(state, runtime_handle)?)
+        .serve(transport, router(state, runtime_handle)?)
         .await?;
     Ok(())
 }
