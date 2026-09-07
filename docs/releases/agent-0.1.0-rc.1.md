@@ -14,3 +14,6 @@ Windows 包不带 Authenticode 签名，SHA-256 不代替发布者代码签名�
 
 公开候选前须通过精确提交的双平台核心测试、HTTPS/WSS、独立包校验和真实系统服务安装/重启/卸载。
 正式稳定版还须补齐真实 Sunshine 的双平台配置、冲突、断线恢复、重启与生效验收；结果以实际记录为准。
+
+双平台原生构建/服务安装及 Windows 11 官方 Sunshine 隔离闭环的已完成结果、真实 `unknown` 观察和未覆盖范围，
+见 [客户端验收记录](../agent-release-acceptance.md)。
