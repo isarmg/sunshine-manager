@@ -15,6 +15,7 @@ import tomllib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+COMMON_FILES = {"LICENSE-APACHE": "LICENSE", "agent/README.md": "README.md", "agent/deploy/bootstrap.example.json": "bootstrap.example.json"}
 
 
 def run(*args, **kwargs):
@@ -31,6 +32,9 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--require-tag", action="store_true")
     args = parser.parse_args()
+    for source in COMMON_FILES:
+        if not (ROOT / source).is_file():
+            parser.error(f"required package input missing: {source}")
     if not args.output.is_absolute() or args.output.exists():
         parser.error("output must be a new absolute directory (no overwrites)")
     if run("git", "status", "--porcelain", "--untracked-files=all"):
@@ -64,9 +68,8 @@ def main():
         stage = Path(tmp) / name
         stage.mkdir()
         shutil.copy2(binary, stage / executable)
-        shutil.copy2(ROOT / "LICENSE", stage / "LICENSE")
-        shutil.copy2(ROOT / "agent/README.md", stage / "README.md")
-        shutil.copy2(ROOT / "agent/deploy/bootstrap.example.json", stage / "bootstrap.example.json")
+        for source, destination in COMMON_FILES.items():
+            shutil.copy2(ROOT / source, stage / destination)
         for item in (["install-windows.ps1", "uninstall-windows.ps1"] if windows else ["install-linux.sh", "uninstall-linux.sh", "sunshine-agent.service"]):
             shutil.copy2(ROOT / "agent/deploy" / item, stage / item)
         manifest = {"product": "sunshine-agent", "version": version, "source_commit": sha, "target": target,

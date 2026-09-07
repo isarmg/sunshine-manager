@@ -18,6 +18,13 @@ VERSION = "0.1.0-rc.1"
 
 
 class PackageTests(unittest.TestCase):
+    def test_packager_inputs_exist_in_standalone_checkout(self):
+        builder_spec = importlib.util.spec_from_file_location("agent_builder", Path(__file__).resolve().parents[1] / "package-agent.py")
+        builder = importlib.util.module_from_spec(builder_spec)
+        builder_spec.loader.exec_module(builder)
+        for source in builder.COMMON_FILES:
+            self.assertTrue((builder.ROOT / source).is_file(), source)
+
     def fixture(self, temporary, windows=False, extra=None, wrong_sha=False):
         target = "x86_64-pc-windows-msvc" if windows else "x86_64-unknown-linux-gnu"
         name = f"sunshine-agent-{VERSION}-{target}"
