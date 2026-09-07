@@ -3,7 +3,7 @@
 ## 1. 生产布局
 
 ```text
-/opt/isarmg/sunshine-manager/releases/0.8.0/  root-owned read-only release
+/opt/isarmg/sunshine-manager/releases/0.9.1/  root-owned read-only release
 /etc/isarmg/sunshine-manager.env             0600 environment
 /var/lib/isarmg/sunshine-manager/db/sunshine-manager.sqlite3  SQLite
 /run/isarmg/sunshine-manager/                locks/runtime
@@ -12,8 +12,8 @@
 systemd 使用 `isarmg-sunshine`，直接执行：
 
 ```text
-/opt/isarmg/sunshine-manager/releases/0.8.0/bin/sunshine-manager \
-  serve-release --root /opt/isarmg/sunshine-manager/releases/0.8.0
+/opt/isarmg/sunshine-manager/releases/0.9.1/bin/sunshine-manager \
+  serve-release --root /opt/isarmg/sunshine-manager/releases/0.9.1
 ```
 
 发行树无 `current` 链接，不依赖工作目录，必须拒绝 symlink、特殊文件、hardlink asset、服务账户拥有的
@@ -21,26 +21,26 @@ asset 和 group/world writable 内容。
 
 ## 2. 构建与安装发行物
 
-从干净且 annotated `v0.8.0` 精确指向 HEAD 的 checkout：
+从干净且 annotated `v0.9.1` 精确指向 HEAD 的 checkout：
 
 ```bash
 python3 scripts/package-release.py /absolute/release-output
 ```
 
-当前工作树通过本地路径联调 Foundation Rust 和八个 Web 包：contracts、http-client、admin-web、admin-ui、
-admin-shell、design-tokens、web-fonts、web-toolchain。它尚未绑定新的不可变发行版，不能作为独立发行树交付。
-正式发行前必须发布一个新的不可变 Foundation revision（不得改写既有 tag），统一 Cargo 来源和 npm tarball
-URL/integrity，更新消费者 gate，并在无 sibling Foundation 的干净环境执行 Cargo 构建与 `npm ci`。
-这些条件未满足前，不得将 Sunshine 0.8.0 工作树标记为正式发行。
+当前 Server Rust 固定 Foundation 0.7.0 / `77e7ad7af8e1bf62432bd6bdd8fa9aff54cb39d1`；八个 Web 包
+使用同版正式 Release tarball 和 lockfile integrity，不依赖相邻 Foundation checkout。独立 CI 已通过，
+见[消费者证据](https://github.com/isarmg/sarmg-foundation-server/blob/main/consumers/axum-0.7.0-evidence.md)。
+这证明当前源码的独立依赖与构建，不表示现有产品 tag 已包含随后主分支的改动；正式交付仍须使用
+与产品版本、完整源码提交一致且通过全部门禁的发行树，不得覆盖旧 tag 或资产。
 Foundation 不是生产运行服务，发行树中不增加其 daemon、配置或 socket。
 
 输出已存在时拒绝覆盖。安装：
 
 ```bash
-tar -xzf sunshine-manager-0.8.0-x86_64-unknown-linux-gnu.tar.gz \
+tar -xzf sunshine-manager-0.9.1-x86_64-unknown-linux-gnu.tar.gz \
   -C /opt/isarmg/sunshine-manager/releases
-/opt/isarmg/sunshine-manager/releases/0.8.0/bin/sunshine-manager \
-  verify-release --root /opt/isarmg/sunshine-manager/releases/0.8.0
+/opt/isarmg/sunshine-manager/releases/0.9.1/bin/sunshine-manager \
+  verify-release --root /opt/isarmg/sunshine-manager/releases/0.9.1
 ```
 
 安装仓库内 systemd unit，创建专用账户、状态目录和 `/etc/isarmg/sunshine-manager.env`，再 enable/start。
@@ -69,7 +69,7 @@ Session、Cookie、CSRF 和登录限流使用 Foundation `AdministratorPolicyV1`
 
 ```bash
 sunshine-manager identity
-sunshine-manager verify-release --root /opt/isarmg/sunshine-manager/releases/0.8.0
+sunshine-manager verify-release --root /opt/isarmg/sunshine-manager/releases/0.9.1
 sunshine-manager doctor
 sunshine-manager admin-create --database-url sqlite:///path/app.db
 sunshine-manager admin-reset-password --database-url sqlite:///path/app.db \
@@ -121,13 +121,12 @@ private/link-local/loopback/metadata egress 和危险 redirect。
 ## 7. 当前连续性限制与外部升级边界
 
 Sunshine Manager 产品仓没有 backup、restore、Schema conversion、key rotation 或 re-encryption 命令。
-`sarmg-upgrade` 是这些能力的唯一所有者，已实现 Sunshine 0.8.0 精确当前 SQLite 状态的 keyed
-backup/verify/restore。数据库与 32-byte external key 必须作为一个安全单元保全，并且只能使用
-该工具的显式命令；文件复制、SQLite `.backup` 或手工换 key 不属于受支持流程。
+`sarmg-upgrade` 是这些能力的唯一所有者，其当前支持矩阵只声明 Sunshine 0.8.0 精确身份的 keyed
+backup/verify/restore，并未声明支持本仓当前 0.9.1。不能因依赖更新或构建通过推定备份可跨版本恢复；
+在对应 adapter 和实际验收完成前，不对当前实例执行该工具的旧版本恢复流程。
 
-需要新环境时，可以恢复经 `sarmg-upgrade` 严格验证的 0.8.0 当前备份，或创建全新当前数据库并重新登记
-Host；不要把非当前库交给 Server，也不要逐表复制。本版本不包含任何历史 edge、key rotation 或
-re-encryption，产品仓也不增加兼容分支。
+需要新环境时，创建全新当前数据库并重新登记实例；已有数据与秘密保持原样，等待明确支持当前身份的
+离线方案。不要把非当前库交给 Server，不逐表复制或修改 metadata；产品仓不增加兼容分支。
 
 ## 8. 监控与故障定位
 
