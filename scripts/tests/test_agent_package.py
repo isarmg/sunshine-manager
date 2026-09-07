@@ -18,6 +18,14 @@ VERSION = "0.1.0-rc.1"
 
 
 class PackageTests(unittest.TestCase):
+    def test_windows_powershell_does_not_inherit_pwsh_modules(self):
+        with patch.dict(os.environ, {"PSModulePath": "incompatible-pwsh-modules", "KEEP_TEST_VALUE": "kept"}, clear=True):
+            self.assertEqual(checker.powershell_environment(), {"KEEP_TEST_VALUE": "kept"})
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell native check")
+    def test_windows_security_module_loads(self):
+        self.assertEqual(checker.powershell("Import-Module Microsoft.PowerShell.Security; (Get-Command Set-Acl).Name"), "Set-Acl")
+
     def test_packager_inputs_exist_in_standalone_checkout(self):
         builder_spec = importlib.util.spec_from_file_location("agent_builder", Path(__file__).resolve().parents[1] / "package-agent.py")
         builder = importlib.util.module_from_spec(builder_spec)

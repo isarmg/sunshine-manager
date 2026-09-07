@@ -61,6 +61,8 @@ jobs:
           persist-credentials: false
       - name: Enforce workflow policy
         run: python scripts/check-workflow-supply-chain.py
+      - name: Check native PowerShell module environment before building
+        run: python -m unittest discover -s scripts/tests -p 'test_agent_package.py'
       - name: Install exact Rust
         run: rustup toolchain install 1.98.0 --profile minimal --component clippy,rustfmt
       - name: Test Agent and secure local transport

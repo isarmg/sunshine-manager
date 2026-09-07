@@ -15,7 +15,14 @@ import zipfile
 
 
 def run(*args):
-    return subprocess.check_output(args, text=True).strip()
+    env = powershell_environment() if args[0] == "powershell.exe" else None
+    return subprocess.check_output(args, text=True, env=env).strip()
+
+
+def powershell_environment():
+    # A pwsh-hosted runner must not inject PowerShell 7 modules into Windows
+    # PowerShell 5.1. Let the child initialize its own standard module paths.
+    return {key: value for key, value in os.environ.items() if key.lower() != "psmodulepath"}
 
 
 def powershell(script):
@@ -129,14 +136,14 @@ foreach($path in @('{escaped}', '{escaped}\\bootstrap.json')) {{
 }}
 """)
         install = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(root / "install-windows.ps1"), "-Binary", str(binary), "-Bootstrap", str(bootstrap)]
-        subprocess.run(install, check=True)
-        if subprocess.run(install, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        subprocess.run(install, check=True, env=powershell_environment())
+        if subprocess.run(install, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=powershell_environment()).returncode == 0:
             raise ValueError("installer overwrote an existing installation")
         powershell("Restart-Service SunshineAgent; (Get-Service SunshineAgent).WaitForStatus('Running',[TimeSpan]::FromSeconds(30))")
         time.sleep(3)
         if powershell("(Get-Service SunshineAgent).Status") != "Running":
             raise ValueError("Agent failed to remain running while Manager was offline")
-        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(root / "uninstall-windows.ps1")], check=True)
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(root / "uninstall-windows.ps1")], check=True, env=powershell_environment())
         if not (Path(os.environ["ProgramData"]) / "SunshineAgent/provisioning/state.sqlite3").is_file():
             raise ValueError("uninstall removed protected state")
     else:
