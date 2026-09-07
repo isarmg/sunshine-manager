@@ -11,7 +11,7 @@ use sarmg_operations::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
-use sunshine_agent_protocol::{
+use sunshine_client_protocol::{
     Binding, Command, ConfigSnapshot, Effectiveness, PROTOCOL, Permission, Report,
     SUNSHINE_VERSION, Task,
 };
@@ -51,7 +51,7 @@ pub struct OperationView {
     pub resolution: Option<String>,
 }
 pub fn namespace(device_id: &str) -> String {
-    format!("sunshine.agent.v1.{device_id}")
+    format!("sunshine.client.v1.{device_id}")
 }
 pub fn action(command: &Command) -> &'static str {
     match command {
@@ -155,7 +155,7 @@ impl OperationManager {
                 .installation_id
                 .as_deref()
                 .and_then(|id| Uuid::parse_str(id).ok())
-                .ok_or_else(|| AppError::Conflict("请先注册 Agent".into()))?,
+                .ok_or_else(|| AppError::Conflict("请先注册 Client".into()))?,
         };
         let operation_id = format!("op_{}", Uuid::new_v4());
         let task = Task {
@@ -216,7 +216,7 @@ impl OperationManager {
     }
     async fn view(&self, stored: StoredOperation) -> AppResult<OperationView> {
         let reconciliation: Option<String> =
-            sqlx::query_scalar("SELECT report_json FROM agent_observations WHERE operation_id=?")
+            sqlx::query_scalar("SELECT report_json FROM client_observations WHERE operation_id=?")
                 .bind(&stored.operation.operation_id)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -351,7 +351,7 @@ impl OperationManager {
     pub async fn disconnected(&self, stored: &StoredOperation) -> AppResult<()> {
         if stored.operation.state == OperationState::Running {
             self.store
-                .abandon_claim(&stored.operation, "agent_disconnected", db::now_micros()?)
+                .abandon_claim(&stored.operation, "client_disconnected", db::now_micros()?)
                 .await
                 .map_err(internal)?;
         }
@@ -381,13 +381,13 @@ impl OperationManager {
             if state != "unknown" {
                 return Err(AppError::Conflict("任务已由管理员处理".into()));
             }
-            sqlx::query("INSERT INTO agent_observations(operation_id,report_json,observed_at_micros) VALUES(?,?,?) ON CONFLICT(operation_id) DO UPDATE SET report_json=excluded.report_json,observed_at_micros=excluded.observed_at_micros")
+            sqlx::query("INSERT INTO client_observations(operation_id,report_json,observed_at_micros) VALUES(?,?,?) ON CONFLICT(operation_id) DO UPDATE SET report_json=excluded.report_json,observed_at_micros=excluded.observed_at_micros")
                 .bind(&stored.operation.operation_id).bind(std::str::from_utf8(&bytes).map_err(internal)?).bind(db::now_micros()?).execute(&mut *tx).await?;
             db::audit(
                 &mut tx,
                 "operation.reconciled",
                 &stored.operation.target_key,
-                "agent",
+                "client",
                 Some(&stored.operation.operation_id),
             )
             .await?;
@@ -397,13 +397,13 @@ impl OperationManager {
                 | Report::ConfigSaved { .. }
                 | Report::RestartAcknowledged { .. } => Transition::Succeed,
                 Report::Unknown { .. } => Transition::MarkIndeterminate {
-                    code: "agent_uncertain".into(),
+                    code: "client_uncertain".into(),
                 },
                 Report::Conflict { .. } | Report::Rejected { .. } => Transition::Fail {
                     code: if matches!(report, Report::Conflict { .. }) {
                         "configuration_conflict"
                     } else {
-                        "agent_rejected"
+                        "client_rejected"
                     }
                     .into(),
                     retryable: false,
@@ -506,14 +506,14 @@ impl OperationManager {
     }
 }
 pub fn validate_snapshot(snapshot: &ConfigSnapshot) -> AppResult<()> {
-    sunshine_agent_protocol::validate_revision(&snapshot.revision)
-        .map_err(|_| AppError::BadRequest("Agent 配置修订无效".into()))?;
+    sunshine_client_protocol::validate_revision(&snapshot.revision)
+        .map_err(|_| AppError::BadRequest("Client 配置修订无效".into()))?;
     if snapshot.sunshine_version != SUNSHINE_VERSION
         || snapshot.fields.iter().any(|(key, value)| {
-            !sunshine_agent_protocol::config::FIELDS.contains(&key.as_str()) || value.len() > 512
+            !sunshine_client_protocol::config::FIELDS.contains(&key.as_str()) || value.len() > 512
         })
     {
-        return Err(AppError::BadRequest("Agent 配置响应无效".into()));
+        return Err(AppError::BadRequest("Client 配置响应无效".into()));
     }
     Ok(())
 }
@@ -532,7 +532,7 @@ fn validate_report(command: &Command, report: &Report) -> AppResult<()> {
             snapshot.effectiveness == Effectiveness::PendingVerification
         }
         (_, Report::Conflict { actual_revision }) => {
-            sunshine_agent_protocol::validate_revision(actual_revision).is_ok()
+            sunshine_client_protocol::validate_revision(actual_revision).is_ok()
         }
         (_, Report::Rejected { .. } | Report::Unknown { .. }) => true,
         _ => false,
@@ -540,6 +540,6 @@ fn validate_report(command: &Command, report: &Report) -> AppResult<()> {
     if valid {
         Ok(())
     } else {
-        Err(AppError::BadRequest("Agent 结果与业务指令不符".into()))
+        Err(AppError::BadRequest("Client 结果与业务指令不符".into()))
     }
 }

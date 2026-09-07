@@ -6,7 +6,7 @@
 
 ```bash
 cargo +1.98.0 check --locked --target x86_64-unknown-linux-gnu --all-targets
-cd clients/web
+cd web
 npm ci
 npm run build
 ```

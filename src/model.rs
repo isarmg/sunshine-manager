@@ -1,6 +1,6 @@
 use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use sunshine_agent_protocol::{Capabilities, ConfigSnapshot};
+use sunshine_client_protocol::{Capabilities, ConfigSnapshot};
 
 #[derive(Debug, Serialize)]
 pub struct DeviceView {
@@ -9,7 +9,7 @@ pub struct DeviceView {
     pub registered: bool,
     pub pairing_pending: bool,
     pub revoked: bool,
-    pub agent_online: bool,
+    pub client_online: bool,
     pub sunshine_reachable: Option<bool>,
     pub configuration_state: String,
     pub snapshot: Option<ConfigSnapshot>,

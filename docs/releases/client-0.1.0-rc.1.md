@@ -1,0 +1,19 @@
+# Sunshine Client 0.1.0-rc.1
+
+本文保留拆分前客户端候选的功能与验收边界，不是独立 Client 仓库的 Release 公告。
+新客户端源码和后续 `v*` 标签位于 [sunshine-manager-client](https://github.com/isarmg/sunshine-manager-client)，不修改既有 Manager 标签。
+
+- 原生构建二进制及安装、自启动、卸载脚本，附配置示例、许可证、manifest、校验和和完整源码身份。
+- Windows 原生服务、ACL、SQLite 执行事实；Linux 独立系统用户、systemd、私有文件状态。
+- 卸载保留身份和去重状态，无覆盖安装、旧状态转换、视频转发、任意脚本或自动下载安装。
+- 初始化拒绝无效 bootstrap，秘密不经命令行或日志传递。
+
+固定适配 Sunshine 官方 `v2026.516.143833`；安装测试不等于真实 Sunshine 配置及重启验收。
+宿主机现有 `2026.528.35537` 不在适配范围；真实验收另用获准建立的官方稳定版隔离实例，不改现有安装。
+Windows 包不带 Authenticode 签名，SHA-256 不代替发布者代码签名。
+
+公开候选前须通过精确提交的双平台核心测试、HTTPS/WSS、独立包校验和真实系统服务安装/重启/卸载。
+正式稳定版还须补齐真实 Sunshine 的双平台配置、冲突、断线恢复、重启与生效验收；结果以实际记录为准。
+
+双平台原生构建/服务安装及 Windows 11 官方 Sunshine 隔离闭环的已完成结果、真实 `unknown` 观察和未覆盖范围，
+见 [客户端验收记录](../client-release-acceptance.md)。

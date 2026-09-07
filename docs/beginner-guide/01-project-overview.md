@@ -30,7 +30,7 @@ release manifest 是一个不可拆分身份。产品不读取非当前状态，
 | cover policy/proxy | HTTPS URL 准入、DNS pin、一次性代理 |
 | db/schema | 当前 SQLite、锁、doctor |
 | release | source-bound binary 与不可变全树验证 |
-| clients/web | 管理员登录、Session 生命周期与 Host 只读概览 |
+| web | 管理员登录、Session 生命周期与 Host 只读概览 |
 
 ## 1.5 Secret 边界
 
@@ -56,7 +56,7 @@ Secret 或上游错误正文。
 
 ## 1.8 仓库地图
 
-`src/` 是 Rust 控制面，`clients/web/` 是 React/Vite UI，`scripts/` 与 `deploy/` 定义正式发行，`docs/` 解释当前
+`src/` 是 Rust 控制面，`web/` 是 React/Vite UI，`scripts/` 与 `deploy/` 定义正式发行，`docs/` 解释当前
 合同。源码和 code-owned identity 是最终事实源。
 
 ## 1.9 平台与前端范围

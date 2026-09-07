@@ -21,7 +21,7 @@ CREATE TABLE devices (
     created_at_micros INTEGER NOT NULL,
     updated_at_micros INTEGER NOT NULL
 );
-CREATE TABLE agent_observations (
+CREATE TABLE client_observations (
     operation_id TEXT PRIMARY KEY REFERENCES _sarmg_operations(operation_id),
     report_json TEXT NOT NULL,
     observed_at_micros INTEGER NOT NULL

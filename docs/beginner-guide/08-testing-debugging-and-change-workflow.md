@@ -7,7 +7,7 @@ cargo +1.98.0 fmt --all -- --check
 cargo +1.98.0 check --locked --target x86_64-unknown-linux-gnu --all-targets
 cargo +1.98.0 clippy --locked --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
 cargo +1.98.0 test --locked --target x86_64-unknown-linux-gnu
-cd clients/web
+cd web
 npm ci
 npm run build
 ```

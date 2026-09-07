@@ -8,7 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
-use sunshine_agent_protocol::{Binding, Capabilities, ConfigSnapshot};
+use sunshine_client_protocol::{Binding, Capabilities, ConfigSnapshot};
 use uuid::Uuid;
 pub const SCHEMA: &str = "sunshine";
 pub use crate::database_schema::{initialize_empty, open_existing, open_or_initialize};
@@ -58,7 +58,7 @@ impl Device {
             registered: self.installation_id.is_some(),
             pairing_pending: self.enrollment_hash.is_some() && self.revoked_at_micros.is_none(),
             revoked: self.revoked_at_micros.is_some(),
-            agent_online: online,
+            client_online: online,
             sunshine_reachable: if online
                 && self
                     .health_at_micros
@@ -192,7 +192,7 @@ pub async fn enroll(
     if changed != 1 {
         return Err(AppError::Unauthorized);
     }
-    audit(&mut tx, "device.enroll", id, "agent", None).await?;
+    audit(&mut tx, "device.enroll", id, "client", None).await?;
     tx.commit().await?;
     Ok(Binding {
         manager_id: manager_id(pool).await?,

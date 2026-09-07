@@ -79,7 +79,7 @@ if (command === "stop") {
   Object.assign(env, {
     SUNSHINE_MANAGER_BIND: "127.0.0.1:18104", SUNSHINE_MANAGER_PRODUCTION: "false",
     SUNSHINE_MANAGER_DATABASE_URL: `sqlite://${runtime}/db/sunshine-manager.sqlite3`,
-    SUNSHINE_MANAGER_STATIC_DIR: join(root, "clients/web/dist"),
+    SUNSHINE_MANAGER_STATIC_DIR: join(root, "web/dist"),
     SUNSHINE_MANAGER_CREDENTIAL_KEY: credentials.key, SUNSHINE_MANAGER_CREDENTIAL_KEY_ID: "local",
     SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_USERNAME: credentials.username,
     SUNSHINE_MANAGER_BOOTSTRAP_ADMIN_PASSWORD: credentials.password,

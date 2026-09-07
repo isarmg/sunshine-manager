@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and publish one immutable, source-bound Sunshine Manager 0.9.1 archive."""
+"""Build and publish one immutable, source-bound Sunshine Manager 0.10.0 archive."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from typing import NoReturn
 
 
 APPLICATION = "sunshine-manager"
-VERSION = "0.9.1"
+VERSION = "0.10.0"
 TARGET = "x86_64-unknown-linux-gnu"
 TAG = f"v{VERSION}"
 
@@ -265,12 +265,12 @@ def main() -> None:
         for directory in [root / "bin", root / "systemd", web_stage]:
             directory.mkdir(parents=True, exist_ok=False)
 
-        # clients/web is the sole browser-client source; the release still exposes
+        # web is the sole browser-client source; the release still exposes
         # the compiled, immutable tree at runtime path web/.
-        run(["npm", "ci"], cwd=source / "clients/web")
+        run(["npm", "ci"], cwd=source / "web")
         run(
             ["npm", "run", "build", "--", "--outDir", os.fspath(web_stage), "--emptyOutDir"],
-            cwd=source / "clients/web",
+            cwd=source / "web",
         )
         if sorted(path.name for path in web_stage.iterdir()) != ["assets", "index.html"]:
             fail("Web build is not the exact current assets/index.html layout")

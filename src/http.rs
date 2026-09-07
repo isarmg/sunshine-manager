@@ -25,8 +25,8 @@ use sarmg_admin_core::AdministratorService;
 use sarmg_admin_sqlite::SqliteAdministratorStore;
 use serde::Deserialize;
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
-use sunshine_agent_protocol::{
-    AgentMessage, Binding, Command, DeliveryMode, MAX_MESSAGE_BYTES, ManagerMessage, PROTOCOL,
+use sunshine_client_protocol::{
+    Binding, ClientMessage, Command, DeliveryMode, MAX_MESSAGE_BYTES, ManagerMessage, PROTOCOL,
     SUNSHINE_VERSION, WEBSOCKET_SUBPROTOCOL,
 };
 use tokio::{
@@ -43,7 +43,7 @@ pub struct WorkerState {
     administrator_origin_mode: AdministratorOriginMode,
     operations: OperationManager,
     static_dir: PathBuf,
-    agent_slots: Arc<Semaphore>,
+    client_slots: Arc<Semaphore>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InternalIdentity {
@@ -69,7 +69,7 @@ impl WorkerState {
             pool,
             secrets,
             static_dir,
-            agent_slots: Arc::new(Semaphore::new(256)),
+            client_slots: Arc::new(Semaphore::new(256)),
         })
     }
     pub fn operation_manager(&self) -> &OperationManager {
@@ -107,9 +107,9 @@ pub fn router(
     )?;
     Ok(Router::new()
         .nest(API_NAMESPACE, api)
-        .route("/sunshine-agent/v1/enroll", post(enroll))
-        .route("/sunshine-agent/v1/identity", get(agent_identity))
-        .route("/sunshine-agent/v1/connect", get(agent_connect))
+        .route("/sunshine-client/v1/enroll", post(enroll))
+        .route("/sunshine-client/v1/identity", get(client_identity))
+        .route("/sunshine-client/v1/connect", get(client_connect))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .fallback_service(ServeDir::new(state.static_dir.clone()))
         .with_state(state)
@@ -235,7 +235,7 @@ async fn operation_resolve(
 
 // Only a local trusted TLS ingress may supply this assertion. The server bind is loopback-only.
 // Reject browser cookies/Origin on the independent device channel.
-fn require_agent_ingress(peer: SocketAddr, headers: &HeaderMap) -> AppResult<()> {
+fn require_client_ingress(peer: SocketAddr, headers: &HeaderMap) -> AppResult<()> {
     if !peer.ip().is_loopback()
         || headers
             .get("x-forwarded-proto")
@@ -245,7 +245,7 @@ fn require_agent_ingress(peer: SocketAddr, headers: &HeaderMap) -> AppResult<()>
         || headers.contains_key("cookie")
     {
         return Err(AppError::Forbidden(
-            "Agent requires trusted HTTPS/WSS ingress".into(),
+            "Client requires trusted HTTPS/WSS ingress".into(),
         ));
     }
     Ok(())
@@ -264,7 +264,7 @@ async fn enroll(
     headers: HeaderMap,
     Json(value): Json<EnrollmentRequest>,
 ) -> AppResult<Response> {
-    require_agent_ingress(peer, &headers)?;
+    require_client_ingress(peer, &headers)?;
     let binding = db::enroll(
         &state.pool,
         &value.device_id.to_string(),
@@ -275,12 +275,12 @@ async fn enroll(
     .await?;
     Ok(([("cache-control", "no-store")], Json(binding)).into_response())
 }
-async fn agent_identity(
+async fn client_identity(
     State(state): State<WorkerState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    require_agent_ingress(peer, &headers)?;
+    require_client_ingress(peer, &headers)?;
     let credential = headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())
@@ -293,13 +293,13 @@ async fn agent_identity(
     )
         .into_response())
 }
-async fn agent_connect(
+async fn client_connect(
     State(state): State<WorkerState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
-    require_agent_ingress(peer, &headers)?;
+    require_client_ingress(peer, &headers)?;
     let credential = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -312,10 +312,10 @@ async fn agent_connect(
         .and_then(|v| v.to_str().ok())
         != Some(WEBSOCKET_SUBPROTOCOL)
     {
-        return Err(AppError::BadRequest("Agent 子协议不支持".into()));
+        return Err(AppError::BadRequest("Client 子协议不支持".into()));
     }
     let permit = state
-        .agent_slots
+        .client_slots
         .clone()
         .try_acquire_owned()
         .map_err(|_| AppError::TooManyRequests { retry_after: 30 })?;
@@ -327,7 +327,7 @@ async fn agent_connect(
             let _permit = permit;
             let mut pending = None;
             let session = uuid::Uuid::new_v4().to_string();
-            let _ = serve_agent(&state, socket, &binding, &session, &mut pending).await;
+            let _ = serve_client(&state, socket, &binding, &session, &mut pending).await;
             if let Some(operation) = pending {
                 let _ = state.operations.disconnected(&operation).await;
             }
@@ -340,7 +340,7 @@ async fn agent_connect(
             .await;
         }))
 }
-async fn receive(socket: &mut WebSocket) -> AppResult<AgentMessage> {
+async fn receive(socket: &mut WebSocket) -> AppResult<ClientMessage> {
     let frame = timeout(Duration::from_secs(10), socket.recv())
         .await
         .map_err(|_| AppError::Unauthorized)?
@@ -349,11 +349,11 @@ async fn receive(socket: &mut WebSocket) -> AppResult<AgentMessage> {
     let Message::Text(text) = frame else {
         return Err(AppError::Unauthorized);
     };
-    serde_json::from_str(&text).map_err(|_| AppError::BadRequest("Agent 消息无效".into()))
+    serde_json::from_str(&text).map_err(|_| AppError::BadRequest("Client 消息无效".into()))
 }
 async fn send(socket: &mut WebSocket, message: ManagerMessage) -> AppResult<()> {
     let text = serde_json::to_string(&message)
-        .map_err(|_| AppError::BadRequest("Agent 指令无效".into()))?;
+        .map_err(|_| AppError::BadRequest("Client 指令无效".into()))?;
     timeout(
         Duration::from_secs(10),
         socket.send(Message::Text(text.into())),
@@ -362,14 +362,14 @@ async fn send(socket: &mut WebSocket, message: ManagerMessage) -> AppResult<()> 
     .map_err(|_| AppError::Unauthorized)?
     .map_err(|_| AppError::Unauthorized)
 }
-async fn serve_agent(
+async fn serve_client(
     state: &WorkerState,
     mut socket: WebSocket,
     binding: &Binding,
     session: &str,
     pending: &mut Option<sarmg_operations::StoredOperation>,
 ) -> AppResult<()> {
-    let AgentMessage::Hello {
+    let ClientMessage::Hello {
         binding: hello,
         capabilities,
     } = receive(&mut socket).await?
@@ -379,14 +379,16 @@ async fn serve_agent(
     if &hello != binding
         || capabilities.protocol != PROTOCOL
         || capabilities.sunshine_version != SUNSHINE_VERSION
-        || capabilities.agent_version.len() > 64
-        || capabilities.managed_fields.len() != sunshine_agent_protocol::config::FIELDS.len()
-        || sunshine_agent_protocol::config::FIELDS.iter().any(|field| {
-            !capabilities
-                .managed_fields
-                .iter()
-                .any(|value| value == field)
-        })
+        || capabilities.client_version.len() > 64
+        || capabilities.managed_fields.len() != sunshine_client_protocol::config::FIELDS.len()
+        || sunshine_client_protocol::config::FIELDS
+            .iter()
+            .any(|field| {
+                !capabilities
+                    .managed_fields
+                    .iter()
+                    .any(|value| value == field)
+            })
     {
         return Err(AppError::Unauthorized);
     }
@@ -413,19 +415,19 @@ async fn serve_agent(
                     Message::Ping(bytes)=>{timeout(Duration::from_secs(10),socket.send(Message::Pong(bytes))).await.map_err(|_|AppError::Unauthorized)?.map_err(|_|AppError::Unauthorized)?;}
                     Message::Pong(_)=>{}
                     Message::Text(text)=>{
-                        let message:AgentMessage=serde_json::from_str(&text).map_err(|_|AppError::BadRequest("Agent 消息无效".into()))?;
+                        let message:ClientMessage=serde_json::from_str(&text).map_err(|_|AppError::BadRequest("Client 消息无效".into()))?;
                         match message{
-                            AgentMessage::Heartbeat{sunshine_reachable,configuration}=>{
+                            ClientMessage::Heartbeat{sunshine_reachable,configuration}=>{
                                 if let Some(snapshot)=&configuration{crate::operations::validate_snapshot(snapshot)?;}
                                 sqlx::query("UPDATE devices SET sunshine_reachable=?,health_at_micros=?,snapshot_json=COALESCE(?,snapshot_json) WHERE device_id=? AND session_id=? AND revoked_at_micros IS NULL")
                                     .bind(sunshine_reachable).bind(db::now_micros()?).bind(configuration.as_ref().map(serde_json::to_string).transpose().map_err(|_|AppError::Unauthorized)?).bind(&id).bind(session).execute(&state.pool).await?;
                             }
-                            AgentMessage::Result{operation_id,report}=>{
-                                let operation=pending.as_ref().filter(|op|op.operation.operation_id==operation_id).ok_or_else(||AppError::BadRequest("Agent 结果未匹配当前任务".into()))?;
+                            ClientMessage::Result{operation_id,report}=>{
+                                let operation=pending.as_ref().filter(|op|op.operation.operation_id==operation_id).ok_or_else(||AppError::BadRequest("Client 结果未匹配当前任务".into()))?;
                                 state.operations.complete(operation,session,report).await?;
                                 *pending=None;
                             }
-                            _=>return Err(AppError::BadRequest("重复 Agent Hello".into())),
+                            _=>return Err(AppError::BadRequest("重复 Client Hello".into())),
                         }
                     }
                     _=>return Err(AppError::Unauthorized),
@@ -464,7 +466,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_static_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("clients/web")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web")
     }
 
     fn test_runtime() -> sarmg_server_runtime::RuntimeHandle {

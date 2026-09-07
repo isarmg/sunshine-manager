@@ -29,10 +29,10 @@ fn release_tooling_targets_only_the_current_product_contract() {
     let manifest_writer = include_str!("../scripts/write-release-manifest.py");
     let systemd_unit = include_str!("../deploy/sunshine-manager.service");
 
-    assert!(package_release.contains("VERSION = \"0.9.1\""));
-    assert!(manifest_writer.contains("VERSION = \"0.9.1\""));
+    assert!(package_release.contains("VERSION = \"0.10.0\""));
+    assert!(manifest_writer.contains("VERSION = \"0.10.0\""));
     assert!(manifest_writer.contains("identity[\"schema_revision\"] != 5"));
-    assert!(systemd_unit.contains("/releases/0.9.1/"));
+    assert!(systemd_unit.contains("/releases/0.10.0/"));
 
     for source in [package_release, manifest_writer, systemd_unit] {
         assert!(!source.contains("0.7.0"));

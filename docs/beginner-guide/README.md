@@ -32,7 +32,7 @@ src/cover_policy.rs               外部封面 URL 准入
 src/cover_proxy.rs                一次性内部封面代理
 src/db.rs / database_schema.rs    当前 SQLite 与 doctor
 src/release_*.rs                  binary/release manifest 合同
-clients/web/                      当前 React/Vite 管理控制台
+web/                      当前 React/Vite 管理控制台
 config/                           源码内运行配置模板
 deploy/                           正式服务模板
 ```
@@ -43,7 +43,7 @@ deploy/                           正式服务模板
 
 ```bash
 cargo +1.98.0 check --locked --target x86_64-unknown-linux-gnu --all-targets
-cd clients/web && npm ci && npm run build
+cd web && npm ci && npm run build
 ```
 
 开发运行至少设置 SQLite、Web dist、管理员密码和 32 字节 Base64 credential key，并显式开启回环

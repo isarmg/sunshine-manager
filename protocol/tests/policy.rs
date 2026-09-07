@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use sunshine_agent_protocol::{config::*, *};
+use sunshine_client_protocol::{config::*, *};
 use uuid::Uuid;
 
 fn task(command: Command, permission: Permission) -> Task {

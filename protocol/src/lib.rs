@@ -47,7 +47,7 @@ pub enum Command {
     },
     Restart {
         expected_revision: String,
-        /// An explicit administrator decision; the Agent must ALSO allow restart locally.
+        /// An explicit administrator decision; the Client must ALSO allow restart locally.
         administrator_confirmed: bool,
     },
 }
@@ -134,8 +134,8 @@ pub struct ConfigSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
     pub protocol: String,
-    pub agent_version: String,
-    pub os: AgentOs,
+    pub client_version: String,
+    pub os: ClientOs,
     pub sunshine_version: String,
     pub restart_allowed: bool,
     pub managed_fields: Vec<String>,
@@ -143,14 +143,14 @@ pub struct Capabilities {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentOs {
+pub enum ClientOs {
     LinuxX86_64,
     WindowsX86_64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AgentMessage {
+pub enum ClientMessage {
     Hello {
         binding: Binding,
         capabilities: Capabilities,
