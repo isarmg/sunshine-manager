@@ -49,7 +49,7 @@ try {
   res.statusCode=404;json({status:false});
  });
  await new Promise(done=>sunshine.listen(0,"127.0.0.1",done));
- await withLocalServer({prefix:"SUNSHINE_MANAGER",binary:"../target/debug/sunshine-manager",extraEnv:{SUNSHINE_MANAGER_PRODUCTION:"false",SUNSHINE_MANAGER_CREDENTIAL_KEY:randomBytes(32).toString("base64"),SUNSHINE_MANAGER_CREDENTIAL_KEY_ID:"test"}},async({base,password,database})=>{
+ await withLocalServer({prefix:"SUNSHINE_MANAGER",binary:process.env.SUNSHINE_TEST_SERVER_BINARY??"../target/debug/sunshine-manager",extraEnv:{SUNSHINE_MANAGER_PRODUCTION:"false",SUNSHINE_MANAGER_CREDENTIAL_KEY:randomBytes(32).toString("base64"),SUNSHINE_MANAGER_CREDENTIAL_KEY_ID:"test"}},async({base,password,database})=>{
   const target=new URL(base);
   ingress=httpsServer(tls,(req,res)=>{
    const upstream=httpRequest(base+req.url,{method:req.method,headers:{...req.headers,"x-forwarded-proto":"https"}},reply=>{res.writeHead(reply.statusCode,reply.headers);reply.pipe(res)});
