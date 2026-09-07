@@ -60,6 +60,12 @@ pub enum ProvisionError {
 fn config_error(_: impl std::fmt::Debug) -> ProvisionError {
     ProvisionError::Configuration
 }
+/// Validate locally before accepting a bootstrap; never print its secret fields.
+pub(crate) fn validate_bootstrap(bytes: &[u8]) -> Result<(), ProvisionError> {
+    let config: Bootstrap = serde_json::from_slice(bytes).map_err(config_error)?;
+    config.validate()
+}
+
 impl Bootstrap {
     fn validate(&self) -> Result<(), ProvisionError> {
         if self.manager_id.is_nil() || self.device_id.is_nil() || self.enrollment_token.len() != 64
@@ -255,5 +261,19 @@ pub async fn run(state_path: &Path, shutdown: watch::Receiver<bool>) -> Result<(
     tokio::select! {
         result=connection.run(identity.binding,capabilities,executor,health_rx,shutdown)=>result.map_err(ProvisionError::from),
         _=monitor=>Err(ProvisionError::Unavailable),
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    #[test]
+    fn incomplete_or_example_bootstrap_is_not_accepted() {
+        for bytes in [
+            b"{}".as_slice(),
+            b"not JSON".as_slice(),
+            include_bytes!("../deploy/bootstrap.example.json").as_slice(),
+        ] {
+            assert!(super::validate_bootstrap(bytes).is_err());
+        }
     }
 }

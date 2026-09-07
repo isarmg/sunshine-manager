@@ -1,0 +1,88 @@
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+import zipfile
+
+spec = importlib.util.spec_from_file_location("agent_package", Path(__file__).resolve().parents[1] / "check-agent-package.py")
+checker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(checker)
+SHA = "a" * 40
+VERSION = "0.1.0-rc.1"
+
+
+class PackageTests(unittest.TestCase):
+    def fixture(self, temporary, windows=False, extra=None, wrong_sha=False):
+        target = "x86_64-pc-windows-msvc" if windows else "x86_64-unknown-linux-gnu"
+        name = f"sunshine-agent-{VERSION}-{target}"
+        names = ["sunshine-agent.exe" if windows else "sunshine-agent", "README.md", "LICENSE", "bootstrap.example.json"]
+        names += ["install-windows.ps1", "uninstall-windows.ps1"] if windows else ["install-linux.sh", "uninstall-linux.sh", "sunshine-agent.service"]
+        files = {n: b"fixture" for n in names}
+        hashes = {n: hashlib.sha256(b).hexdigest() for n, b in files.items()}
+        manifest = {"product": "sunshine-agent", "version": VERSION, "source_commit": "b" * 40 if wrong_sha else SHA, "target": target, "protocol": "sunshine-management/1", "authenticode_signed": False, "files": hashes}
+        files["manifest.json"] = json.dumps(manifest).encode()
+        files["SHA256SUMS"] = "".join(f"{hashlib.sha256(b).hexdigest()}  {n}\n" for n, b in sorted(files.items())).encode()
+        entries = [(name + "/" + n, b) for n, b in files.items()]
+        if extra is not None:
+            entries.append((extra.replace("ROOT", name), b"bad"))
+        archive = temporary / (name + (".zip" if windows else ".tar.gz"))
+        if windows:
+            with zipfile.ZipFile(archive, "w") as out:
+                for n, b in entries:
+                    out.writestr(n, b)
+        else:
+            with tarfile.open(archive, "w:gz") as out:
+                for n, b in entries:
+                    entry = tarfile.TarInfo(n)
+                    entry.size = len(b)
+                    out.addfile(entry, io.BytesIO(b))
+        archive.with_name(archive.name + ".sha256").write_text(f"{checker.digest(archive)}  {archive.name}\n")
+        return archive
+
+    def test_both_platform_packages(self):
+        for windows in [False, True]:
+            with self.subTest(windows=windows), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                archive = self.fixture(root, windows=windows)
+                with patch.object(checker, "run", return_value=f"sunshine-agent {VERSION} (git {SHA}; sunshine-management/1)"):
+                    checker.verify(archive, root, SHA)
+
+    def test_traversal_extra_and_duplicate_entries_rejected(self):
+        for windows in [False, True]:
+            for extra in ["ROOT/../escape", "ROOT/unknown", "ROOT/README.md", "/absolute"]:
+                with self.subTest(windows=windows, extra=extra), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    archive = self.fixture(root, windows=windows, extra=extra)
+                    with self.assertRaises(ValueError):
+                        checker.verify(archive, root, SHA)
+
+    def test_source_mismatch_rejected_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = self.fixture(root, wrong_sha=True)
+            with patch.object(checker, "run") as executable, self.assertRaises(ValueError):
+                checker.verify(archive, root, SHA)
+            executable.assert_not_called()
+
+    def test_tampered_archive_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = self.fixture(root)
+            with archive.open("ab") as file:
+                file.write(b"modified")
+            with self.assertRaises(ValueError):
+                checker.verify(archive, root, SHA)
+
+    def test_install_test_refuses_user_host(self):
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}), self.assertRaises(ValueError):
+            checker.install_test(None, None, None)
+
+
+if __name__ == "__main__":
+    unittest.main()

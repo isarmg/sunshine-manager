@@ -338,6 +338,7 @@ impl ProtectedState {
         {
             return Err(StorageError);
         }
+        crate::provisioning::validate_bootstrap(&bytes).map_err(storage_error)?;
         self.put("bootstrap.json", &bytes)
     }
 }

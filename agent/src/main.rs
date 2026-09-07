@@ -7,8 +7,9 @@ fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() == 1 && args[0] == "--version" {
         println!(
-            "sunshine-agent {} ({})",
+            "sunshine-agent {} (git {}; {})",
             env!("CARGO_PKG_VERSION"),
+            env!("SUNSHINE_AGENT_BUILD_SHA"),
             sunshine_agent_protocol::PROTOCOL
         );
         return ExitCode::SUCCESS;

@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Explicit local installation only. Never invoked from a Manager task.
-if [[ $(id -u) != 0 || $(uname -m) != x86_64 || $# != 2 ]]; then
+if [[ $(id -u) != 0 || $(uname -s) != Linux || $(uname -m) != x86_64 || $# != 2 ]]; then
   echo "Usage (root, Linux x86_64): install-linux.sh ABSOLUTE_AGENT_BINARY ABSOLUTE_PROTECTED_BOOTSTRAP" >&2
   exit 1
 fi
 binary=$1
 bootstrap=$2
-if [[ $binary != /* || $bootstrap != /* || ! -f $binary || -L $binary ]]; then exit 1; fi
+if [[ $binary != /* || $bootstrap != /* || ! -f $binary || -L $binary || ! -f $bootstrap || -L $bootstrap ]]; then exit 1; fi
+if [[ $("$binary" --version) != sunshine-agent\ * ]]; then
+  echo "Expected a verified Sunshine Agent binary." >&2
+  exit 1
+fi
 for target in /opt/sunshine-agent /var/lib/sunshine-agent /etc/systemd/system/sunshine-agent.service; do
   if [[ -e $target || -L $target ]]; then
     echo "Refusing to overwrite an existing installation or state. Upgrade/restore belongs to sarmg-upgrade." >&2

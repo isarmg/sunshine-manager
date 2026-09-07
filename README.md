@@ -1,7 +1,7 @@
 # Sunshine Manager
 
-Agent 管理改造正在实施：新增的 `agent/`、`protocol/` 已有独立执行内核和 WSS 客户端，但尚未替换当前 Manager 或形成可安装发行包。
-目标为 Windows/Linux x86_64 和 Sunshine 官方 v2026.516.143833；进度与未完成项见 [Agent 管理实施记录](docs/agent-management-v1.md)。
+当前 Manager 已接入产品 Agent 的注册、WSS、任务与状态管理；`agent/` 提供 Windows/Linux x86_64 客户端和独立安装包流程。
+首个客户端候选为 `agent-v0.1.0-rc.1`，固定适配 Sunshine 官方 v2026.516.143833；安装方法见 [Agent 说明](agent/README.md)，验收边界见 [候选说明](docs/releases/agent-0.1.0-rc.1.md)。候选构建通过不等于真实 Sunshine 双平台验收完成。
 
 管理 Web 支持实例创建、Sunshine 分类配置、应用管理、客户端配对、日志及远端服务操作。
 使用说明见 [实例创建](docs/instance-management.md) 和 [Sunshine 远端管理](docs/remote-management.md)。

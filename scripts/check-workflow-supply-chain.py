@@ -133,10 +133,13 @@ def matching_job_property(segment: list[Line], pattern: re.Pattern[str]) -> list
 
 def validate_job(source: str, header: Line, segment: list[Line]) -> None:
     runners = matching_job_property(segment, RUNNER_KEY)
-    # Only this product Agent validation job may use Windows. Server/release jobs remain Linux-only.
+    # Only explicit product Agent jobs may use Windows. Server jobs remain Linux-only.
     expected_runner = (
         AGENT_WINDOWS_RUNNER
-        if source == ".github/workflows/ci.yml" and header.content == "agent-windows-core:"
+        if (source, header.content) in {
+            (".github/workflows/ci.yml", "agent-windows-core:"),
+            (".github/workflows/agent-release.yml", "agent-windows-package:"),
+        }
         else FIXED_RUNNER
     )
     if len(runners) != 1 or runners[0].content != f"runs-on: {expected_runner}":
@@ -348,6 +351,14 @@ jobs:
         FIXED_RUNNER, AGENT_WINDOWS_RUNNER
     )
     validate_workflow(".github/workflows/ci.yml", windows_agent)
+    windows_package = windows_agent.replace("agent-windows-core:", "agent-windows-package:")
+    validate_workflow(".github/workflows/agent-release.yml", windows_package)
+    for invalid in [windows_package.replace("agent-windows-package:", "server:"), windows_package.replace(AGENT_WINDOWS_RUNNER, "windows-latest")]:
+        try:
+            validate_workflow(".github/workflows/agent-release.yml", invalid)
+        except PolicyError:
+            continue
+        raise PolicyError("Agent release exception escaped its exact job/runner scope")
     cases = {
         "floating action": base.replace(
             PINNED_OFFICIAL_ACTIONS["actions/checkout"], "v4"

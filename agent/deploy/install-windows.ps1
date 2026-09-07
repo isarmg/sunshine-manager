@@ -2,6 +2,13 @@
 param([Parameter(Mandatory=$true)][string]$Binary,[Parameter(Mandatory=$true)][string]$Bootstrap)
 $ErrorActionPreference = 'Stop'
 if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'Windows x86_64 required' }
+foreach ($source in @($Binary,$Bootstrap)) {
+  if ($source -notmatch '^[A-Za-z]:\\') { throw 'Absolute local drive paths required' }
+  $item = Get-Item -LiteralPath $source
+  if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Regular source files required' }
+}
+$identity = & $Binary --version
+if ($LASTEXITCODE -ne 0 -or $identity -notlike 'sunshine-agent *') { throw 'Expected a verified Sunshine Agent binary' }
 $binDir = Join-Path $env:ProgramFiles 'SunshineAgent'
 $stateDir = Join-Path $env:ProgramData 'SunshineAgent'
 if ((Test-Path -LiteralPath $binDir) -or (Test-Path -LiteralPath $stateDir) -or (Get-Service SunshineAgent -ErrorAction SilentlyContinue)) {

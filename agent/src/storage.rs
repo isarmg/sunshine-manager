@@ -87,6 +87,7 @@ impl ProtectedState {
         if self.read("bootstrap.json")?.is_some() || self.read("identity.json")?.is_some() {
             return Err(StorageError);
         }
+        crate::provisioning::validate_bootstrap(&bytes).map_err(storage_error)?;
         self.put("bootstrap.json", &bytes)
     }
 }
