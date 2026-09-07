@@ -3,18 +3,18 @@
 当前 Manager 已接入产品 Agent 的注册、WSS、任务与状态管理；`agent/` 提供 Windows/Linux x86_64 客户端和独立安装包流程。
 首个客户端候选为 `agent-v0.1.0-rc.1`，固定适配 Sunshine 官方 v2026.516.143833；安装方法见 [Agent 说明](agent/README.md)，验收边界见 [候选说明](docs/releases/agent-0.1.0-rc.1.md)。候选构建通过不等于真实 Sunshine 双平台验收完成。
 
-管理 Web 支持实例创建、Sunshine 分类配置、应用管理、客户端配对、日志及远端服务操作。
+管理 Web 支持实例创建与 Agent 配对、设备状态、白名单配置预览/编辑、明确授权重启和任务记录。
 使用说明见 [实例创建](docs/instance-management.md) 和 [Sunshine 远端管理](docs/remote-management.md)。
 
-Sunshine Manager `0.8.0` 是独立的 Sunshine 主机管理服务。Server API 采用 sarmg-foundation-server 的
-持久管理员控制面，并提供主机凭据管理、应用/客户端控制和可恢复的异步远程操作；当前内置 Web 提供登录、会话
-恢复、实例连接设置及完整远端管理入口。Server 使用 Rust/Axum 与 SQLite，内置 Web 使用 Foundation 精确基线的 React/Vite。
+Sunshine Manager `0.9.1` 是独立的 Sunshine 主机管理服务。Server API 采用 sarmg-foundation-server 的
+持久管理员控制面；Manager 保存设备身份、任务及审计，不集中保存 Sunshine 管理密码。
+实际执行由主机上的独立 Agent 完成。Server 使用 Rust/Axum 与 SQLite，内置 Web 使用 Foundation 精确基线的 React/Vite。
 
-项目只接受唯一当前 `/api/v2`、`0.8.0` SQLite Schema、凭据 key ID 和不可变发行身份，不注册平行路径，
+项目只接受唯一当前 `/api/v2`、当前 SQLite Schema、凭据 key ID 和不可变发行身份，不注册平行路径，
 不读取非当前数据库或其他 key。产品仓不实现迁移、备份和恢复；这些能力归 `sarmg-upgrade` 所有。
-`sarmg-upgrade` 已支持 Sunshine 0.8.0 当前状态备份/验证/恢复，但不存在任何旧版本 parser、历史转换边或兼容路径。
-当前 `sunshine:sgev1:` Foundation AES-256-GCM envelope 强制使用确定性、长度分帧的 AAD：Host credential 绑定 Host ID
-和 `secret` 字段域，operation request 绑定 operation ID、action 和 `request_ciphertext` 字段域。相同前缀
+升级工具的支持范围以其明确版本矩阵为准，不能将旧 Manager 的备份支持视为当前 Agent 状态的支持。
+当前 `sunshine:sgev1:` Foundation AES-256-GCM envelope 强制使用确定性、长度分帧的 AAD：
+operation request 绑定 operation ID、action 和 `request_ciphertext` 字段域。相同前缀
 但使用空 AAD 生成的密文也不是当前格式，启动、doctor 和业务读取都会拒绝，不存在旧密文 fallback。
 同一 master key 还通过 HKDF-SHA-256 的两个独立 info 分别派生 request fingerprint 与 Idempotency-Key 的
 HMAC-SHA-256 key；SQLite 中没有低熵请求或幂等键的裸 SHA-256 摘要，也不接受旧摘要兼容。

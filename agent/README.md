@@ -30,7 +30,9 @@ Administrators 和 SYSTEM，拒绝重解析点或不受保护输入。注册成�
 
 ## Linux 安装与卸载
 
-要求 Linux GNU x86_64、systemd、支持 `openat2` 的内核。先核验官方附件校验和并解包：
+发行包构建及原生安装验收基线为 Ubuntu 24.04 x86_64（glibc 2.39、systemd、支持 `openat2` 的内核）。
+不是 musl 静态包，不保证较旧 glibc 或其他发行版可直接运行；其他系统须自行原生构建并验收。
+先核验官方附件校验和并解包：
 
 ```sh
 sha256sum --check sunshine-agent-0.1.0-rc.1-x86_64-unknown-linux-gnu.tar.gz.sha256
@@ -51,6 +53,8 @@ sudo bash uninstall-linux.sh
 已有安装、状态或服务账户使安装器拒绝继续；不提供覆盖安装或旧状态转换。
 
 ## Windows 安装与卸载
+
+原生构建/系统服务 CI 基线为 Windows Server 2025 x86_64；桌面 Windows 的真实 Sunshine 验收另行记录。
 
 在管理员 PowerShell 中，通过 `Get-FileHash -Algorithm SHA256` 比对发行校验文件，解包并审阅脚本，
 在允许受信任本地脚本的执行策略下运行：

@@ -1,53 +1,40 @@
-# Sunshine 远端管理
+# Sunshine Agent 远端管理
 
-登录后，左侧只显示实例名称。选择实例后，在右侧功能导航中使用：
+实例列表为独立表格页面，功能导航位于顶部。新建实例只填写名称并取得一次性配对码；
+在 Sunshine 主机安装 [Agent](../agent/README.md)，由其主动建立 Manager WSS 通道。
+Sunshine 用户名、密码、可信证书仅在 Agent 本机配置，不在 Manager 的连接表单填写。
 
-| 页面 | 功能 |
+| 页面 | 当前功能 |
 | --- | --- |
-| 连接设置 | 实例名称、地址、端口、Sunshine 凭据；删除管理器中的实例 |
-| Sunshine 配置 | 常规、输入、音频/显示、网络、文件路径、编码器分类配置，搜索及完整 JSON 编辑；读取远端语言 |
-| 应用管理 | 列出、新增、编辑、删除、关闭当前应用，封面预览和 HTTPS 封面导入 |
-| 客户端与配对 | 查看、启用/禁用、解除单个/全部配对，提交 Moonlight PIN |
-| 日志 | 按需读取与刷新 Sunshine 日志，按纯文本显示 |
-| 服务操作 | 重启 Sunshine、重置显示设备配置 |
+| 实例 | 每行一个设备，创建、选择、取消未用配对码 |
+| 设备状态 | 分别显示 Agent 在线、Sunshine 可达、配置状态，撤销设备凭据 |
+| Sunshine 配置 | 读取受管字段、编辑白名单字段、差异预览、保存、冲突提示、明确确认重启 |
+| 任务记录 | 查询持久操作及结果，按现有规则核对不确定结果 |
 
-配置从远端读取，保留所有实际配置字段，不生成并覆盖远端默认值。分类表单是字段分组，
-不是所有操作系统都支持所有字段。未列出的字段也能编辑；高级 JSON 的值必须是字符串，
-复杂结构按照 Sunshine 配置格式填写为 JSON 字符串。`status`、`platform`、`version` 是响应元数据，不参与保存。
-空值使用 Sunshine 默认值；保存替换配置文件，不自动重启。修改监听地址、端口、证书路径可能断开管理连接。
-配置保存和应用序号修改均应避免多个管理员同时编辑；提交前需要核对。
+当前仅开放 `read_config`、`patch_config` 和 `restart`。没有应用启动/准备命令编辑、
+Moonlight PIN 管理、任意文件写入、日志透传、任意 HTTP 代理或自动下载安装入口。
+Agent 管理设备配对不是 Sunshine–Moonlight 串流配对，不改变原有串流链路。
 
-应用表单保留未编辑字段；准备/撤销命令、分离命令以及全部额外字段可在高级 JSON 中修改。
-新增使用 index=-1，编辑/删除使用读取时的数组序号。命令在远端执行，不在 Manager 执行。
-封面导入仍受服务端 HTTPS 域名允许列表和一次性代理约束，未配置时会拒绝，前端不绕过此策略。
+## 配置与结果
 
-## 异步结果与安全
+配置修改携带预期修订、设置/删除字段及手动重启策略。Agent 重新读取完整配置，
+过滤 `status`、`platform`、`version` 等元数据，校验字段后合并保存，保留未修改字段。
+未列入白名单的设置不能通过高级 JSON 绕过限制。完整配置修订也涵盖非受管字段，
+发现修订冲突时先重新读取并确认差异。该检查不是 Sunshine 原生原子并发控制；受管字段应由 Manager 统一管理。
 
-所有远端修改通过当前管理员 Session/CSRF 和 `/api/v2/sunshine/hosts/{id}/…` API 提交，
-每次明确提交生成独立 `Idempotency-Key`。202 只表示进入持久任务队列，不代表成功。
-远端 HTTP 2xx 还必须包含布尔 `status: true` 才算成功；`false` 为明确失败，缺失/错误类型为结果不确定。
-页面展示 `op_…` 操作 ID 和 pending/running/succeeded/failed/unknown/dead_letter/resolved 状态；
-只轮询安全的 GET，每个状态阶段最多 120 次；查询失败后可手动查询，不自动重放修改。
+保存成功只表示配置文件已保存，页面显示等待重启。重启必须同时有 Agent 本机授权和
+管理员逐次确认，不自动打断串流。重启后重新核对服务与配置；无法证明运行时生效的设置仍显示待验证。
 
-结果不确定或需要人工处理时阻止新的远端修改。先检查远端实际状态，再明确记录成功、失败或无法确认；
-人工核对不会重新执行请求。提交响应丢失时显示请求标识，须核对后才可解除页面保护。
-操作 ID 可在页面刷新后手动查询，但只允许查询当前管理员自己的任务。
-切换实例、刷新或退出不会取消服务端已接受任务。页面草稿和 PIN 不持久化；切换页面前请先处理未保存修改。
+浏览器通过管理员 Session、CSRF 和 `/api/v2/sunshine/devices/{id}/tasks` 提交业务指令。
+202 只表示任务已持久化，并不表示执行成功。任务复用 Foundation 的
+`pending/running/succeeded/failed/unknown/dead_letter/resolved` 状态，重复投递先核对持久执行事实。
+不确定结果不盲目重复重启，人工核对也不等于重新执行。刷新或退出不取消已接受任务。
 
-认证逻辑不变，401 使会话失效；PIN 提交后立即清空，原始远端异常不展示。
-日志是受认证的显式读取内容，可能包含敏感路径，分享前应检查。
-管理 Web 的诊断入口和面板已移除，运行健康检查保留。
+## 验证边界
 
-字段及请求格式核对依据：[Sunshine 配置页面](https://github.com/LizardByte/Sunshine/blob/master/src_assets/common/assets/web/config.html)、
-[Sunshine HTTP 实现](https://github.com/LizardByte/Sunshine/blob/master/src/confighttp.cpp)。产品只使用本仓当前 API，不加入历史版本分支。
+协议与固定上游版本依据见 [Agent 管理协议](agent-management-v1.md)，发行与实测范围见
+[客户端候选记录](releases/agent-0.1.0-rc.1.md)。
 
-## 验证
-
-在 `clients/web` 运行 `npm run test:browser`，覆盖 Chromium/Firefox 的远端管理、
-失败/不确定状态、严格响应校验、CSRF、401、移动布局及明暗主题 WCAG AA。
-
-已构建 `target/debug/sunshine-manager` 开发二进制后，可运行 `node tests/live-remote-controls.mjs`。
-需要 OpenSSL 和 Chromium：测试建立独立 CA/服务端证书、临时数据库和 HTTPS Sunshine 协议夹具，
-验证真实 Manager 的配置、应用 CRUD、客户端控制、PIN、日志、重启、显示重置及持久任务查询。
-只为测试子进程设置 CA，不修改系统信任库或现有实例；临时证书和数据库结束后清理。
-此测试不代表在真实 Sunshine 硬件、编码器或 Moonlight 串流环境中完成验收。
+`clients/web` 中的 `npm run test:browser` 覆盖管理界面；构建 Manager 和 Agent 开发二进制后，
+`node tests/agent-end-to-end.mjs` 验证真实浏览器、Manager、独立 Agent 与 HTTPS/WSS，
+其中 Sunshine 仍是协议夹具，不可当作真实 Sunshine 硬件或运行时验收。

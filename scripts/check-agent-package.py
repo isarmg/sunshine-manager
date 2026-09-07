@@ -102,13 +102,32 @@ def install_test(root, binary, temporary):
     windows = platform.system() == "Windows"
     ca = temporary / "ca.pem"
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(temporary / "key.pem"), "-out", str(ca), "-days", "1", "-subj", "/CN=Agent installation test", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "subjectAltName=IP:127.0.0.1"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    bootstrap = temporary / "bootstrap.json"
+    fixture = temporary / "private-bootstrap"
+    fixture.mkdir(mode=0o700)
+    bootstrap = fixture / "bootstrap.json"
     bootstrap.write_text(json.dumps({"manager_endpoint": "wss://127.0.0.1:9/sunshine-agent/v1/connect", "manager_ca_pem": ca.read_text(), "manager_id": "11111111-1111-4111-8111-111111111111", "device_id": "22222222-2222-4222-8222-222222222222", "enrollment_token": "a" * 64, "sunshine_endpoint": "https://127.0.0.1:47990/", "sunshine_ca_pem": ca.read_text(), "sunshine_username": "test", "sunshine_password": "installation-fixture-only", "restart_allowed": False}), encoding="utf-8")
     bootstrap.chmod(0o600)
     if windows:
-        # Protect only this newly created fixture, using numeric SIDs (localized Windows safe).
-        escaped = str(temporary).replace("'", "''")
-        powershell(f"$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; & icacls.exe '{escaped}' /inheritance:r /grant:r ('*'+$sid+':(OI)(CI)F') '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /Q; if($LASTEXITCODE){{throw 'fixture ACL failed'}}")
+        # Protect only the secret fixture, not extracted executable/scripts. Set explicit
+        # file ACEs as well as directory inheritance; recursive icacls can remove access
+        # from archive files when it disables inherited ACEs at every descendant.
+        escaped = str(fixture).replace("'", "''")
+        powershell(f"""
+$current=[Security.Principal.WindowsIdentity]::GetCurrent().User
+foreach($path in @('{escaped}', '{escaped}\\bootstrap.json')) {{
+  $directory=(Get-Item -LiteralPath $path).PSIsContainer
+  $acl=if($directory){{New-Object System.Security.AccessControl.DirectorySecurity}}else{{New-Object System.Security.AccessControl.FileSecurity}}
+  $acl.SetAccessRuleProtection($true,$false)
+  $acl.SetOwner($current)
+  foreach($sid in @($current.Value,'S-1-5-18','S-1-5-32-544')) {{
+    $identity=New-Object System.Security.Principal.SecurityIdentifier $sid
+    $inherit=if($directory){{[System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'}}else{{[System.Security.AccessControl.InheritanceFlags]::None}}
+    $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($identity,'FullControl',$inherit,'None','Allow')
+    $acl.AddAccessRule($rule)
+  }}
+  Set-Acl -LiteralPath $path -AclObject $acl
+}}
+""")
         install = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(root / "install-windows.ps1"), "-Binary", str(binary), "-Bootstrap", str(bootstrap)]
         subprocess.run(install, check=True)
         if subprocess.run(install, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
