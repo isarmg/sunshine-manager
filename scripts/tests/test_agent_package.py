@@ -3,11 +3,11 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 
 spec = importlib.util.spec_from_file_location("agent_package", Path(__file__).resolve().parents[1] / "check-agent-package.py")
@@ -24,6 +24,9 @@ class PackageTests(unittest.TestCase):
         builder_spec.loader.exec_module(builder)
         for source in builder.COMMON_FILES:
             self.assertTrue((builder.ROOT / source).is_file(), source)
+        directory = Mock()
+        directory.iterdir.return_value = [PureWindowsPath(name) for name in ['bootstrap.example.json', 'README.md', 'LICENSE']]
+        self.assertEqual([p.name for p in builder.package_files(directory)], ['LICENSE', 'README.md', 'bootstrap.example.json'])
 
     def fixture(self, temporary, windows=False, extra=None, wrong_sha=False):
         target = "x86_64-pc-windows-msvc" if windows else "x86_64-unknown-linux-gnu"

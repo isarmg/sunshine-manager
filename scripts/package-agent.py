@@ -27,6 +27,11 @@ def digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def package_files(directory):
+    # WindowsPath sorts case-insensitively; the wire format uses exact ASCII names.
+    return sorted(directory.iterdir(), key=lambda path: path.name)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
@@ -74,14 +79,14 @@ def main():
             shutil.copy2(ROOT / "agent/deploy" / item, stage / item)
         manifest = {"product": "sunshine-agent", "version": version, "source_commit": sha, "target": target,
                     "protocol": "sunshine-management/1", "authenticode_signed": False,
-                    "files": {p.name: digest(p) for p in sorted(stage.iterdir())}}
+                    "files": {p.name: digest(p) for p in package_files(stage)}}
         (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-        (stage / "SHA256SUMS").write_text("".join(f"{digest(p)}  {p.name}\n" for p in sorted(stage.iterdir())), encoding="utf-8")
+        (stage / "SHA256SUMS").write_text("".join(f"{digest(p)}  {p.name}\n" for p in package_files(stage)), encoding="utf-8")
         args.output.mkdir(parents=True, exist_ok=False)
         archive = args.output / (name + (".zip" if windows else ".tar.gz"))
         if windows:
             with zipfile.ZipFile(archive, "x", zipfile.ZIP_DEFLATED) as out:
-                for p in sorted(stage.iterdir()):
+                for p in package_files(stage):
                     out.write(p, f"{name}/{p.name}")
         else:
             with tarfile.open(archive, "x:gz") as out:
