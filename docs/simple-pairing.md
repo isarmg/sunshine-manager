@@ -1,4 +1,4 @@
-# 简化配对（主分支）
+# 简化配对（Server 0.10.0 / Client 0.1.0-rc.3）
 
 客户端 UI 仅填写 Server 地址、256-bit 配对码、本机 Sunshine 回环地址/端口及账号密码。
 CA 文件、Manager ID、设备 ID 不再是用户输入项。客户端与 Server 需同时部署支持本流程的版本。

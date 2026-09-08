@@ -62,8 +62,7 @@ Moonlight 客户端使用 AMD64，也不改变 Sunshine 上游 API；它们仍�
 | `..._BOOTSTRAP_ADMIN_PASSWORD` | `_sarmg_administrators` 为空时必填 | 12–1024 字节且无 ASCII control；使用后立即轮换初始密码 |
 
 Session、Cookie、CSRF 和登录限流使用 Foundation `AdministratorPolicyV1` 固定值，产品环境变量不能覆盖。
-| `..._COVER_URL_ALLOWLIST` | 默认空 | 逗号分隔精确 DNS host |
-| `..._COVER_PROXY_ORIGIN` | allowlist 非空时必填 | Sunshine 主机直达 HTTPS origin |
+Server 不保存 Sunshine 管理密码；该密码仅由 Client 在 Sunshine 主机本地受保护保存。
 
 ## 4. 管理命令
 
@@ -88,12 +87,8 @@ username。不存在 `EMAIL` 环境变量、`--email` 参数、JSON `email` 字�
 ## 5. Doctor
 
 `doctor` 验证 product metadata、现场 Schema fingerprint、SQLite integrity/foreign keys、可回滚写事务，
-并复验 Host 规范字段、用当前 key 认证全部 Host credential 和全部持久 operation request；operation
-plaintext 还必须能解析为当前严格 enum 且 action 与行一致。认证上下文必须精确匹配：Host 使用 Host ID
-和 `secret` 字段域，operation 使用 operation ID、action 和 `request_ciphertext` 字段域。密文被复制到另一
-记录、action 被修改、用途错误或使用空 AAD 时都失败；不会尝试旧格式或不带 AAD 的 fallback。它不连接
-Sunshine。扫描还会从已解密的每条 operation request 重算 HKDF 分域 HMAC-SHA-256 fingerprint 并用
-constant-time 比较；裸 SHA-256 或另一 master key 生成的 fingerprint 会使 doctor/启动失败。它不保留
+并验证 Manager 身份及全部持久 operation request。请求必须通过当前任务解码和密文身份校验；
+不会尝试旧格式或不带 AAD 的 fallback，也不会连接 Sunshine。它不保留
 业务探针行；它不是纯只读命令，因为会执行随后回滚的写事务。
 
 其中 WAL/FULL synchronous/foreign-key/busy-timeout 连接基线、checkpoint、integrity/FK 和 Schema 指纹算法来自
@@ -111,12 +106,14 @@ Foundation；数据库文件权限、main/WAL/journal 私有代际快照预检�
 ## 6. 反向代理和网络
 
 公网 TLS proxy 保留原 Host，并确保 Session Cookie Secure；同时由 proxy 设置经验证的 HSTS/CSP 等浏览器
-响应策略，Server 当前不终止浏览器 TLS 或注入这些 header。应用端口只对 proxy 回环开放。Sunshine
-Host 地址由防火墙限制。Manager 对每次 Sunshine 连接都强制使用 HTTPS，并验证证书链、有效期和主机名；
-这不是“优先项”，也没有开发或单 Host 绕过开关。私有 CA 必须先安全安装到服务进程实际使用的系统信任库。
+响应策略，Server 当前不终止浏览器 TLS 或注入这些 header。应用端口只对可信本机 proxy 回环开放。
+proxy 必须覆盖而非信任外部传入的 `X-Forwarded-Proto`，仅在已验证的 TLS 连接上设置为 `https`，
+并支持 `/sunshine-client/v1/connect` 的 WebSocket Upgrade。独立设备通道拒绝 Cookie/Origin。
 
-封面代理 origin 必须由 Sunshine Host 直接访问，不能把一次性路径经过公共 proxy；两端网络都要拒绝
-private/link-local/loopback/metadata egress 和危险 redirect。
+Client 主动连接 Server 的 WSS，无需在 Sunshine 主机开放额外入站管理端口。
+只有 Client 通过本机回环 HTTPS 访问 Sunshine，并验证证书链、有效期及 IP SAN；Server 不直接连接 Sunshine。
+两端仅接受系统已信任证书，没有 TOFU 或绕过开关。私有 CA 必须先安全安装到 Client 实际运行身份使用的
+系统信任库；Windows LocalSystem 使用计算机信任存储。详见[简化配对](https://github.com/isarmg/sunshine-manager-server/blob/v0.10.0/docs/simple-pairing.md)。
 
 ## 7. 当前连续性限制与外部升级边界
 
@@ -133,14 +130,14 @@ backup/verify/restore，并未声明支持本仓当前 0.10.0。不能因依赖�
 1. 检查 systemd、release verify 和 Web asset 是否通过。
 2. 检查反向代理 TLS、Cookie、Origin/Host 与系统时钟。
 3. 运行 doctor，确认 SQLite、写能力和全部密文。
-4. 对 pending 查看 worker/Host 网络；对 unknown 先查 Sunshine 实际状态，禁止盲重试。
-5. 对封面错误检查 allowlist、DNS 的全部地址、MIME/大小、proxy origin 和 Host egress。
+4. 对 pending 查看 Client 在线状态、WSS 入口和任务队列；对 unknown 先查 Sunshine 实际状态，禁止盲重试。
+5. 分别核验 Client 在线、Sunshine 可达和配置状态；“已保存”“待重启”“待验证”不等于运行时已生效。
 6. 监控 SQLite/WAL、operation backlog、unknown 数量、磁盘和 inode。
 
 API 错误必须同时检查 HTTP status 与稳定 `code`；`message` 只用于展示。若 Web 报
 `invalid_error_response`，先检查代理是否改写 JSON/content-type 或服务端是否返回非当前错误形状；若为
 `invalid_response_shape`，说明 2xx 正文已偏离当前端点合同，不应在浏览器添加宽松分支。
-Foundation Runtime 校验传入的 `x-request-id`，缺失时生成并写入响应头及错误 envelope；受保护诊断也带 Request ID。
+Foundation Runtime 校验传入的 `x-request-id`，缺失时生成并写入响应头及错误 envelope；Web 不提供诊断页面。
 共享 Web Shell 只显示安全提示和校验后的关联 ID，不显示内部异常文本。
 
 持久操作每次领取使用唯一 owner；执行最多 90 秒，租约 120 秒。完成写入要求当前未过期 owner；
