@@ -190,6 +190,10 @@ async fn serve(release_root: Option<&std::path::Path>) -> anyhow::Result<()> {
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
     }
+    administrator_service
+        .store()
+        .validate_all_administrators()
+        .await?;
     let state = WorkerState::new(pool, config.secrets, config.production, config.static_dir)?;
     let recovered = state.operation_manager().recover_startup().await?;
     if let Err(error) = state.operation_manager().deliver_outbox().await {

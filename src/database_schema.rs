@@ -19,6 +19,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 pub const APPLICATION: &str = "sunshine-manager";
 pub const APPLICATION_VERSION: &str = env!("CARGO_PKG_VERSION");
+// Persisted schema identity changes only with a data-format migration.
+const SCHEMA_APPLICATION_VERSION: &str = "0.10.1";
 pub const SCHEMA_REVISION: i64 = 6;
 pub const SCHEMA_SHA256: &str = "94f1704eca2543b721a442b40f149c70340daa242009ca58fdd17ebe47aea0db";
 
@@ -27,7 +29,7 @@ const CURRENT_SCHEMA_SQL: &str = include_str!("../schema/generated/current_schem
 pub fn current_schema_identity() -> SchemaIdentity {
     SchemaIdentity::new(
         APPLICATION,
-        APPLICATION_VERSION,
+        SCHEMA_APPLICATION_VERSION,
         u64::try_from(SCHEMA_REVISION).expect("current schema revision is non-negative"),
         SCHEMA_SHA256,
     )
@@ -162,7 +164,7 @@ pub async fn initialize_empty(pool: &SqlitePool) -> anyhow::Result<()> {
          ) VALUES(1,?,?,?,?)",
     )
     .bind(APPLICATION)
-    .bind(APPLICATION_VERSION)
+    .bind(SCHEMA_APPLICATION_VERSION)
     .bind(SCHEMA_REVISION)
     .bind(SCHEMA_SHA256)
     .execute(&mut *transaction)

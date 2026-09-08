@@ -5,17 +5,17 @@ export async function checkHeaderActions(page, listPath) {
   const header = page.getByRole("banner");
   const actions = header.getByRole("group", { name: "全局操作" });
   const buttons = actions.getByRole("button");
-  await expect(buttons).toHaveCount(5);
+  await expect(buttons).toHaveCount(6);
   assert.deepEqual(await buttons.evaluateAll(nodes => nodes.map(node => node.getAttribute("aria-label"))),
-    ["新建实例", "刷新", "切换为英文", await buttons.nth(3).getAttribute("aria-label"), "退出"]);
+    ["新建实例", "刷新", "切换为英文", await buttons.nth(3).getAttribute("aria-label"), "退出", "账号设置"]);
   assert.match(await buttons.nth(3).getAttribute("aria-label"), /^切换到.*模式$/);
-  for (let index = 0; index < 5; index++) {
+  for (let index = 0; index < 6; index++) {
     const button = buttons.nth(index);
     assert.equal((await button.innerText()).trim(), "");
     await expect(button.locator('svg[aria-hidden="true"]')).toHaveCount(1);
     assert.equal(await button.getAttribute("title"), await button.getAttribute("aria-label"));
   }
-  for (const name of ["新建实例", "刷新", "退出"]) {
+  for (const name of ["新建实例", "刷新", "退出", "账号设置"]) {
     await expect(page.getByRole("button", { name, exact: true })).toHaveCount(1);
     await expect(page.getByRole("main").getByRole("button", { name, exact: true })).toHaveCount(0);
   }
@@ -28,12 +28,12 @@ export async function checkHeaderActions(page, listPath) {
     }));
     assert.ok(rects.every(rect => Math.abs(rect.y - rects[0].y) < 1 && rect.width >= 24 && rect.height >= 24));
     assert.ok(rects.slice(1).every((rect, i) => rect.x >= rects[i].right));
-    assert.ok(Math.abs(rects[4].right - (width - 16)) < 2, "actions must align to the top-right header padding");
+    assert.ok(Math.abs(rects[5].right - (width - 16)) < 2, "actions must align to the top-right header padding");
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   }
   await page.setViewportSize(previousViewport);
   await buttons.first().focus();
-  for (let index = 1; index < 5; index++) {
+  for (let index = 1; index < 6; index++) {
     await page.keyboard.press("Tab");
     await expect(buttons.nth(index)).toBeFocused();
   }
