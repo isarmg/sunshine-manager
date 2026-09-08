@@ -146,6 +146,8 @@ pub struct Capabilities {
 pub enum ClientOs {
     LinuxX86_64,
     WindowsX86_64,
+    MacosX86_64,
+    MacosAarch64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,4 +257,29 @@ pub fn decode_manager_message(bytes: &[u8]) -> Result<ManagerMessage, InvalidTas
         return Err(InvalidTask);
     }
     serde_json::from_slice(bytes).map_err(|_| InvalidTask)
+}
+
+#[cfg(test)]
+mod macos_platform_tests {
+    use super::*;
+    #[test]
+    fn additive_platform_values_preserve_old_clients() {
+        for os in [
+            ClientOs::LinuxX86_64,
+            ClientOs::WindowsX86_64,
+            ClientOs::MacosX86_64,
+            ClientOs::MacosAarch64,
+        ] {
+            let bytes = serde_json::to_vec(&os).unwrap();
+            assert_eq!(serde_json::from_slice::<ClientOs>(&bytes).unwrap(), os);
+        }
+        assert_eq!(
+            serde_json::to_string(&ClientOs::MacosAarch64).unwrap(),
+            "\"macos_aarch64\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ClientOs::MacosX86_64).unwrap(),
+            "\"macos_x86_64\""
+        );
+    }
 }
