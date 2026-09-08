@@ -26,7 +26,7 @@ async function stopClient(){
  }
 }
 async function startClient(state){
- client=spawn(clientBinary,["run","--state",state],{stdio:["ignore",clientLog.fd,clientLog.fd]});
+ client=spawn(clientBinary,["run","--state",state],{env:{...process.env,SSL_CERT_FILE:join(root,"ca.crt")},stdio:["ignore",clientLog.fd,clientLog.fd]});
  await new Promise((done,fail)=>{client.once("spawn",done);client.once("error",fail)});
 }
 try {
@@ -76,8 +76,11 @@ try {
    await page.getByRole("button",{name:"创建实例",exact:true}).click();
    const ticket=await created;const id=ticket.device.id;const api="/api/v2/sunshine/devices/"+id;
    const bootstrap=join(root,"bootstrap.json"),state=join(root,"client");
-   await writeFile(bootstrap,JSON.stringify({manager_endpoint:"wss://127.0.0.1:"+ingress.address().port+"/sunshine-client/v1/connect",manager_ca_pem:await readFile(caCert,"utf8"),manager_id:ticket.manager_id,device_id:id,enrollment_token:ticket.token,sunshine_endpoint:"https://127.0.0.1:"+sunshine.address().port+"/",sunshine_ca_pem:await readFile(caCert,"utf8"),sunshine_username:"fixture",sunshine_password:"local-only-password",restart_allowed:true}),{mode:0o600});
+   await writeFile(bootstrap,JSON.stringify({manager_endpoint:"wss://127.0.0.1:"+ingress.address().port+"/sunshine-client/v1/connect",enrollment_token:ticket.token,sunshine_endpoint:"https://127.0.0.1:"+sunshine.address().port+"/",sunshine_username:"fixture",sunshine_password:"local-only-password",restart_allowed:true}),{mode:0o600});
    await exec(clientBinary,["init","--state",state,"--bootstrap",bootstrap]);
+   // The CLI wizard must reject an untrusted CA before consuming the pairing code.
+   await assert.rejects(exec(clientBinary,["pair","--state",state],{env:{...process.env,SSL_CERT_FILE:"/nonexistent-test-trust-store"}}));
+   await exec(clientBinary,["pair","--state",state],{env:{...process.env,SSL_CERT_FILE:caCert}});
    clientLog=await open(join(root,"client.log"),"wx",0o600);await startClient(state);
    const device=async()=>{const r=await page.request.get(base+"/api/v2/sunshine/devices");return(await r.json()).find(d=>d.id===id)};
    await expect.poll(async()=>(await device()).client_online,{timeout:20000}).toBe(true);

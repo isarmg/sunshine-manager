@@ -44,6 +44,40 @@ fn manager(pool: &sqlx::SqlitePool) -> OperationManager {
 }
 
 #[tokio::test]
+async fn pairing_code_resolves_only_active_unconsumed_devices() {
+    let (_dir, pool) = database().await;
+    let ticket = db::create_device(&pool, "pair", "admin").await.unwrap();
+    let target = db::resolve_pairing(&pool, &ticket.token).await.unwrap();
+    assert_eq!(target["device_id"], ticket.device.id);
+    assert_eq!(target["manager_id"], ticket.manager_id.to_string());
+    assert!(db::resolve_pairing(&pool, "bad").await.is_err());
+    assert!(
+        db::resolve_pairing(&pool, &db::random_token())
+            .await
+            .is_err()
+    );
+    db::enroll(
+        &pool,
+        &ticket.device.id,
+        Uuid::new_v4(),
+        &ticket.token,
+        &db::random_token(),
+    )
+    .await
+    .unwrap();
+    assert!(db::resolve_pairing(&pool, &ticket.token).await.is_err());
+    let cancelled = db::create_device(&pool, "cancel", "admin").await.unwrap();
+    db::cancel_pairing(&pool, &cancelled.device.id, "admin")
+        .await
+        .unwrap();
+    assert!(db::resolve_pairing(&pool, &cancelled.token).await.is_err());
+    let revoked = db::create_device(&pool, "revoke", "admin").await.unwrap();
+    db::revoke(&pool, &revoked.device.id, "admin")
+        .await
+        .unwrap();
+    assert!(db::resolve_pairing(&pool, &revoked.token).await.is_err());
+}
+#[tokio::test]
 async fn enrollment_is_single_use_hashed_bound_and_revocable() {
     let (_dir, pool) = database().await;
     let ticket = db::create_device(&pool, "设备", "admin").await.unwrap();

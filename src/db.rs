@@ -136,6 +136,13 @@ pub async fn create_device(
         token,
     })
 }
+pub async fn resolve_pairing(pool: &SqlitePool, token: &str) -> AppResult<serde_json::Value> {
+    validate_token(token).map_err(|_| AppError::Unauthorized)?;
+    let id: Option<String> = sqlx::query_scalar("SELECT device_id FROM devices WHERE enrollment_hash=? AND installation_id IS NULL AND revoked_at_micros IS NULL")
+        .bind(token_hash(token).as_slice()).fetch_optional(pool).await?;
+    let id = id.ok_or(AppError::Unauthorized)?;
+    Ok(serde_json::json!({"manager_id": manager_id(pool).await?, "device_id": id}))
+}
 pub async fn cancel_pairing(pool: &SqlitePool, id: &str, actor: &str) -> AppResult<()> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let changed = sqlx::query("UPDATE devices SET enrollment_hash=NULL,updated_at_micros=? WHERE device_id=? AND installation_id IS NULL AND revoked_at_micros IS NULL AND enrollment_hash IS NOT NULL")

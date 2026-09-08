@@ -5,9 +5,9 @@ import {Button,Dialog,ErrorState,FormField,TextField} from "@sarmg/admin-ui";
 import {useAdminApplication,errorRequestId} from "../shell/index.js";
 import {CURRENT_API_PREFIX,isTicket,type Ticket} from "./api";
 export function TicketPanel({ticket}:{ticket:Ticket}){
- return <section className="sarmg-content-panel"><h2>{t("实例配对码", "Instance pairing code")}</h2><p>{t("配对码仅本次显示，不设有效期；配对成功或手动取消后失效。请在 Sunshine 主机的受保护 bootstrap.json 中填写；不要放入命令行、日志或聊天。", "This code is shown only once and has no expiry. Pairing or manual cancellation invalidates it. Enter it in the protected bootstrap.json on the Sunshine host; never place it in command lines, logs or chats.")}</p>
+ return <section className="sarmg-content-panel"><h2>{t("实例配对码", "Instance pairing code")}</h2><p>{t("配对码仅本次显示，不设有效期；配对成功或手动取消后失效。请在 Sunshine 客户端的配对窗口中填写；不要放入命令行、日志或聊天。", "This code is shown only once and has no expiry. Pairing or manual cancellation invalidates it. Enter it in the Sunshine Client pairing window; never place it in command lines, logs or chats.")}</p>
  <dl><dt>{t("管理端标识", "Manager ID")}</dt><dd>{ticket.manager_id}</dd><dt>{t("设备标识", "Device ID")}</dt><dd>{ticket.device.id}</dd><dt>{t("配对码", "Pairing code")}</dt><dd><code className="sunshine-token">{ticket.token}</code></dd></dl>
- <p>{t("配置 管理端 的 WSS 地址和可信 CA、本机 Sunshine 的 HTTPS 地址及凭据后，按安装手册运行 sunshine-client init，再启动 客户端 服务。管理端 不接收 Sunshine 密码。", "Configure the manager WSS address and trusted CA, and the local Sunshine HTTPS address and credentials. Follow the installation guide to run sunshine-client init, then start the client service. The manager never receives the Sunshine password.")}</p></section>;
+ <p>{t("客户端只需填写服务器地址、此配对码，以及本机 Sunshine 地址、端口和账号密码；设备标识自动获取。两端必须使用系统信任且名称匹配的 HTTPS 证书。服务器不接收 Sunshine 密码。", "Enter the server address, this pairing code, and the local Sunshine address, port and credentials in the client. Device IDs are resolved automatically. Both endpoints require system-trusted HTTPS certificates matching their hostnames. The server never receives the Sunshine password.")}</p></section>;
 }
 export function DeviceRegistrationDialog({close,created}:{close():void;created(ticket:Ticket):void}){
  const{client}=useAdminApplication();const[pending,setPending]=useState(false);const[failure,setFailure]=useState<{requestId?:string}|null>(null);

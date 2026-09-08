@@ -108,6 +108,7 @@ pub fn router(
     Ok(Router::new()
         .nest(API_NAMESPACE, api)
         .route("/sunshine-client/v1/enroll", post(enroll))
+        .route("/sunshine-client/v1/pairing", post(resolve_pairing))
         .route("/sunshine-client/v1/identity", get(client_identity))
         .route("/sunshine-client/v1/connect", get(client_connect))
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -249,6 +250,24 @@ fn require_client_ingress(peer: SocketAddr, headers: &HeaderMap) -> AppResult<()
         ));
     }
     Ok(())
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingRequest {
+    token: String,
+}
+async fn resolve_pairing(
+    State(state): State<WorkerState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(value): Json<PairingRequest>,
+) -> AppResult<Response> {
+    require_client_ingress(peer, &headers)?;
+    Ok((
+        [("cache-control", "no-store")],
+        Json(db::resolve_pairing(&state.pool, &value.token).await?),
+    )
+        .into_response())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
