@@ -31,7 +31,10 @@ fn release_tooling_targets_only_the_current_product_contract() {
 
     assert!(package_release.contains("VERSION = \"0.10.0\""));
     assert!(manifest_writer.contains("VERSION = \"0.10.0\""));
-    assert!(manifest_writer.contains("identity[\"schema_revision\"] != 5"));
+    assert!(manifest_writer.contains(&format!(
+        "identity[\"schema_revision\"] != {}",
+        sunshine_manager::database_schema::SCHEMA_REVISION
+    )));
     assert!(systemd_unit.contains("/releases/0.10.0/"));
 
     for source in [package_release, manifest_writer, systemd_unit] {
