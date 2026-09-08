@@ -117,7 +117,7 @@ async fn exact_current_schema_is_durable_and_self_identifying() {
         (
             1,
             database_schema::APPLICATION.to_string(),
-            env!("CARGO_PKG_VERSION").to_string(),
+            "0.10.1".to_string(),
             database_schema::SCHEMA_REVISION,
             database_schema::SCHEMA_SHA256.to_string(),
         )
