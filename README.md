@@ -8,7 +8,7 @@
 使用说明见 [实例创建](docs/instance-management.md) 和 [Sunshine 远端管理](docs/remote-management.md)。
 主分支的新客户端配对入口和系统证书信任要求见 [简化配对](docs/simple-pairing.md)。
 
-Sunshine Manager `0.10.2` 是独立的 Sunshine 主机管理服务。Server API 采用 sarmg-foundation-server 的
+Sunshine Manager `0.10.3` 是独立的 Sunshine 主机管理服务。Server API 采用 sarmg-foundation-server 的
 持久管理员控制面；Manager 保存设备身份、任务及审计，不集中保存 Sunshine 管理密码。
 实际执行由主机上的独立 Client 完成。Server 使用 Rust/Axum 与 SQLite，内置 Web 使用 Foundation 精确基线的 React/Vite。
 

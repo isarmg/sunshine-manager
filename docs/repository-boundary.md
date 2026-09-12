@@ -4,7 +4,7 @@
 客户端独立仓库为 https://github.com/isarmg/sunshine-manager-client ，通过完整 Git 提交固定协议依赖。
 客户端不需要检出或构建 Server 可执行程序；Server 的常规构建也不需要客户端源码。
 
-当前 Server 开发版本为 0.10.2，Schema revision 为 6。设备通道及业务字段统一使用 Client 命名，
+当前 Server 开发版本为 0.10.3，Schema revision 为 6。设备通道及业务字段统一使用 Client 命名，
 不接入旧命名接口或旧数据库，也不提供迁移。历史版本标签保持不变。
 
 跨仓库端到端测试保留在 `web/tests/client-end-to-end.mjs`。先在独立 Client 仓库构建所需精确提交，
