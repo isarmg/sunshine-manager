@@ -84,7 +84,7 @@
 | SUN-076 | static root 必须绝对路径且顶层恰好 `index.html`/`assets` | `validate_static_dir` | 保障 | 中 | 启动可能提供错误构建、源码或残留文件 | 相对路径、缺项、额外顶层项 |
 | SUN-077 | static tree 深度≤32、条目≤10000、只含真实目录/普通文件 | `validate_static_tree` | 保障 | 中 | symlink/hardlink/巨树可越界读取或制造 TOCTOU/DoS | link、设备文件、深度/数量、nlink |
 | SUN-078 | 正式 static 资产非服务账户所有且不可 group/world 写 | Unix metadata validation | 保障 | 中 | 被攻陷服务进程可篡改下次响应的管理 UI | uid、022 mode、开发模式差异 |
-| SUN-079 | Server Rust 固定 Foundation `=0.7.3` + 完整 revision `45006e4b981666529f4e5003bbf6a76cb60578ff`；八个 Web 包固定同版正式 Release tarball 与 lockfile integrity | `Cargo.toml`、`web/package.json`、lockfiles、toolchain check | 开发运维 | 中 | path/file、可变分支或多版本混用破坏独立供应链；构建通过不代表主分支已发布 | 独立 CI；Cargo locked resolve、`npm ci`、URL/version/integrity 与无 sibling 来源检查 |
+| SUN-079 | Server Rust 固定 Foundation `=0.7.5` + 完整 revision `80c49f2f811d8d47dbbcdb6c9521924de7d3184e`；八个 Web 包固定同版正式 Release tarball 与 lockfile integrity | `Cargo.toml`、`web/package.json`、lockfiles、toolchain check | 开发运维 | 中 | path/file、可变分支或多版本混用破坏独立供应链；构建通过不代表主分支已发布 | 独立 CI；Cargo locked resolve、`npm ci`、URL/version/integrity 与无 sibling 来源检查 |
 | SUN-080 | 认证状态机统一使用 Foundation admin-web | `@sarmg/admin-web`、`App.tsx` | 保障 | 高 | 登录/恢复/401/退出竞态会在各产品重复实现并分叉 | stale response、重登、卸载、no-store |
 | SUN-081 | Web 请求固定 same-origin、严格响应 guard 和超时/大小边界 | Foundation http-client/contracts | 保障 | 中 | 可被配置成跨 origin 发送 Cookie，或把畸形响应当合法数据 | absolute URL 拒绝、错 shape/MIME/超时 |
 | SUN-082 | 当前 Web 在认证丢失后清空 Host 列表和错误状态，并取消慢 Host 响应回填 | `web/src/App.tsx` effect cleanup | 保障 | 中 | 下一位使用同一浏览器的人可能看到上一管理员的 Host 投影；当前 Web 没有 operation 状态 | 慢请求、restore error、logout/login overlap |

@@ -128,8 +128,8 @@ clean checkout + annotated v0.9.1 == HEAD
 归档只包含 `0.9.1/` 当前树，没有迁移、备份或恢复逻辑。
 
 Foundation 提供的 current-only Schema identity 会进入 binary identity 的构造，但不会替代本项目更严格的
-release-tree verifier。当前 Server Rust 固定 Foundation `=0.7.3` 和完整 revision
-`45006e4b981666529f4e5003bbf6a76cb60578ff`，八个 Web 包固定正式 `v0.7.3` Release URL 与 lockfile integrity。
+release-tree verifier。当前 Server Rust 固定 Foundation `=0.7.5` 和完整 revision
+`80c49f2f811d8d47dbbcdb6c9521924de7d3184e`，八个 Web 包固定正式 `v0.7.5` Release URL 与 lockfile integrity。
 已通过独立 CI，见[消费者矩阵](https://github.com/isarmg/sarmg-foundation-server/blob/main/consumers/consumer-matrix.json)；后续更新仍须统一清单和锁图、
 在无 sibling 环境验证，且不能将主分支的新改动冒充既有产品 Release 的内容。
 
